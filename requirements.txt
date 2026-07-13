@@ -5,3 +5,6 @@ plotly
 supabase
 streamlit-searchbox
 Pillow
+sqlalchemy
+psycopg2-binary
+python-dotenv
