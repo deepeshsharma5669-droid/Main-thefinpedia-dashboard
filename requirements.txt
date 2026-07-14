@@ -8,3 +8,4 @@ Pillow
 sqlalchemy
 psycopg2-binary
 python-dotenv
+Authlib>=1.3.2
