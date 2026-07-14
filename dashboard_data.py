@@ -12,6 +12,22 @@ key: str = os.environ.get("SUPABASE_KEY", "sb_publishable_3XCZ3J8YWOmxa8r21eO4qg
 supabase: Client = create_client(url, key)
 
 
+# ============================================================
+# 🔐 AUTH — Role & Permission Lookups
+# ============================================================
+def get_role_for_email(email):
+    """Looks up app_users.role for the given email. Returns None if not found."""
+    result = supabase.table("app_users").select("role").eq("email", email).execute()
+    rows = result.data
+    return rows[0]["role"] if rows else None
+
+
+def get_permissions_for_role(role):
+    """Returns list of section names this role can access, from role_permissions."""
+    result = supabase.table("role_permissions").select("section").eq("role", role).eq("has_access", True).execute()
+    return [r["section"] for r in result.data]
+
+
 # Helper function to convert table/view data directly into a Pandas DataFrame
 def _df(view_name):
     page_size = 1000
@@ -1157,3 +1173,54 @@ def get_new_vs_returning_users(include_post_planner=True):
     returning_active_users, unknown_registration_date."""
     view_name = "product_usage_new_vs_returning_with_planner" if include_post_planner else "product_usage_new_vs_returning_without_planner"
     return supabase.table(view_name).select("*").single().execute().data
+
+# ============================================================
+# 🔐 AUTH ADMIN PANEL — User & Role Permission Management
+# ============================================================
+def get_all_app_users():
+    """All rows in app_users, for the Admin panel's user table."""
+    result = supabase.table("app_users").select("*").order("email").execute()
+    return pd.DataFrame(result.data)
+
+
+def upsert_app_user(email, role, name):
+    """Adds a new user, or updates role/name if the email already exists."""
+    existing = supabase.table("app_users").select("email").eq("email", email).execute().data
+    if existing:
+        supabase.table("app_users").update({"role": role, "name": name}).eq("email", email).execute()
+    else:
+        supabase.table("app_users").insert({"email": email, "role": role, "name": name}).execute()
+
+
+def delete_app_user(email):
+    supabase.table("app_users").delete().eq("email", email).execute()
+
+
+def get_distinct_roles():
+    """Distinct role names currently defined in role_permissions — drives the role dropdowns,
+    so new roles created in role_permissions show up automatically without a code change."""
+    result = supabase.table("role_permissions").select("role").execute()
+    return sorted({r["role"] for r in result.data})
+
+
+def get_all_role_permissions():
+    """All role x section x has_access rows, for the Admin panel's permission grid."""
+    result = supabase.table("role_permissions").select("*").execute()
+    return pd.DataFrame(result.data)
+
+
+def update_role_permission(role, section, has_access):
+    """Toggles a single role/section cell. Inserts the row if it doesn't exist yet
+    (e.g. a brand-new role that has no rows for some sections)."""
+    existing = (
+        supabase.table("role_permissions")
+        .select("role")
+        .eq("role", role)
+        .eq("section", section)
+        .execute()
+        .data
+    )
+    if existing:
+        supabase.table("role_permissions").update({"has_access": has_access}).eq("role", role).eq("section", section).execute()
+    else:
+        supabase.table("role_permissions").insert({"role": role, "section": section, "has_access": has_access}).execute()

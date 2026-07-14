@@ -4,7 +4,6 @@ import plotly.graph_objects as go
 import pandas as pd
 
 import dashboard_data as dd
-from content_usage import show_content_usage
 
 # ============================================================
 # 🎨 DESIGN TOKENS — duplicated from app.py on purpose.
@@ -691,5 +690,3 @@ def show_product_usage():
             chart_card_close()
 
     st.markdown("<br>", unsafe_allow_html=True)
-    with st.expander("📝 Content Analytics", expanded=False):
-        show_content_usage()
