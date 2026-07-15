@@ -127,6 +127,50 @@ if not user_role:
 
 allowed_sections = _get_allowed_sections(user_role)
 
+#CHATBOT 
+
+FLOWISE_CHATFLOW_ID = "55e85b17-582c-42fa-9670-62302a602aab"
+FLOWISE_API_HOST = "https://cloud.flowiseai.com"
+
+components.html(f"""
+<script>
+(function() {{
+    const doc = window.parent.document;
+
+    // avoid injecting twice on Streamlit reruns
+    if (doc.getElementById('flowise-embed-script')) return;
+
+    const script = doc.createElement('script');
+    script.type = 'module';
+    script.id = 'flowise-embed-script';
+    script.innerHTML = `
+        import Chatbot from "https://cdn.jsdelivr.net/npm/flowise-embed/dist/web.js";
+        Chatbot.init({{
+            chatflowid: "{FLOWISE_CHATFLOW_ID}",
+            apiHost: "{FLOWISE_API_HOST}",
+            theme: {{
+                button: {{
+                    backgroundColor: "#2563EB",
+                    right: 24,
+                    bottom: 24,
+                    size: 56,
+                    iconColor: "white",
+                }},
+                chatWindow: {{
+                    welcomeMessage: "Hi! Ask me anything about TheFinPedia.",
+                    backgroundColor: "#ffffff",
+                    height: 600,
+                    width: 380,
+                    fontSize: 14,
+                }}
+            }}
+        }});
+    `;
+    doc.body.appendChild(script);
+}})();
+</script>
+""", height=0, width=0)
+
 # ============================================================
 # 🎨 STEP 1: UPGRADED CSS STYLE ENGINE
 # ============================================================
