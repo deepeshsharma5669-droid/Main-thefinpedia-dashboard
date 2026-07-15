@@ -145,7 +145,7 @@ html, body, [class*="css"] {
 .stApp { background: #F7F8FA; }
 
 .block-container {
-    padding: 1.8rem 2rem 3rem 2rem;
+    padding: 3.5rem 2rem 3rem 2rem;
     max-width: 1560px;
 }
 
@@ -1137,7 +1137,7 @@ if revenue_tab:
                               range: [0, Math.max.apply(null, totalsArr) * 1.18] }},
                     yaxis: {{ color: '#1E293B', tickfont: {{ family: 'Manrope', size: 11 }} }},
                     legend: {{
-                        orientation: 'v', yanchor: 'top', y: 1, xanchor: 'left', x: 1.02,
+                        orientation: 'v', yanchor: 'top', y: 1, xanchor: 'left', x: 1.0,
                         font: {{ size: 12, color: '#0F172A', family: 'Manrope' }}
                     }},
                     hoverlabel: {{
@@ -1150,12 +1150,25 @@ if revenue_tab:
                 var gd = document.getElementById('{div_id}');
 
                 // Fix: Plotly caches legend text-fitting boxes on its first layout
-                // pass. If that happens before the iframe settles to its real
-                // width, the legend text truncates permanently (e.g. "Reopened"
-                // -> "R") — resize() alone doesn't redo that calculation. Delay
-                // the initial plot instead of plotting immediately and patching
-                // it up afterward.
-                setTimeout(function() {{
+                // pass. A fixed setTimeout delay was a guess at when the iframe
+                // would be settled to its real width — unreliable across
+                // different zoom levels/environments. Instead, wait until the
+                // container's width is actually unchanged across two animation
+                // frames before ever calling Plotly.newPlot.
+                function waitForStableWidth(el, cb, tries) {{
+                    tries = tries || 0;
+                    var w1 = el.offsetWidth;
+                    requestAnimationFrame(function() {{
+                        var w2 = el.offsetWidth;
+                        if ((w1 === w2 && w1 > 0) || tries > 40) {{
+                            cb();
+                        }} else {{
+                            waitForStableWidth(el, cb, tries + 1);
+                        }}
+                    }});
+                }}
+
+                waitForStableWidth(gd, function() {{
                     Plotly.newPlot(gd, barTraces.concat([traceTotal]), layout, config);
 
                     window.addEventListener('resize', function() {{ Plotly.Plots.resize(gd); }});
@@ -1178,7 +1191,7 @@ if revenue_tab:
                         }}
                         return true;
                     }});
-                }}, 60);
+                }});
             }})();
             </script>
             """
@@ -2700,7 +2713,7 @@ if engineering_tab:
                   xaxis: {{ title: 'Issues Count', color: '#1E293B', tickfont: {{ family: 'Manrope', size: 11 }} }},
                   yaxis: {{ color: '#1E293B', tickfont: {{ family: 'Manrope', size: 11 }} }},
                   legend: {{
-                      orientation: 'v', yanchor: 'top', y: 1, xanchor: 'left', x: 1.02,
+                      orientation: 'v', yanchor: 'top', y: 1, xanchor: 'left', x: 1.0,
                       font: {{ size: 11, color: '#0F172A', family: 'Manrope' }},
                       bgcolor: 'rgba(255,255,255,0.95)', bordercolor: '#E5E7EB', borderwidth: 1
                   }},
@@ -2713,15 +2726,26 @@ if engineering_tab:
               var config = {{ displayModeBar: false, responsive: true }};
               var gd = document.getElementById('sevChart');
 
-              // Fix: Plotly computes and CACHES the legend's text-fitting boxes
-              // only once, on its very first layout pass. If that first pass
-              // happens before this iframe has settled to its real width (which
-              // it often hasn't, immediately on load), the legend text gets
-              // truncated permanently — a later resize() call fixes the bars/axes
-              // but does NOT redo that legend text-fitting calculation. So we
-              // delay the *initial* plot itself, rather than plotting immediately
-              // and trying to patch it up afterward.
-              setTimeout(function() {{
+              // Fix: Plotly caches the legend's text-fitting boxes on its first
+              // layout pass. A fixed setTimeout delay was a guess at when the
+              // iframe would be settled to its real width — unreliable across
+              // different zoom levels/environments. Instead, wait until the
+              // container's width is actually unchanged across two animation
+              // frames before ever calling Plotly.newPlot.
+              function waitForStableWidth(el, cb, tries) {{
+                  tries = tries || 0;
+                  var w1 = el.offsetWidth;
+                  requestAnimationFrame(function() {{
+                      var w2 = el.offsetWidth;
+                      if ((w1 === w2 && w1 > 0) || tries > 40) {{
+                          cb();
+                      }} else {{
+                          waitForStableWidth(el, cb, tries + 1);
+                      }}
+                  }});
+              }}
+
+              waitForStableWidth(gd, function() {{
                   Plotly.newPlot(gd, [traceClosed, traceOpen, traceReopen, traceTotal], layout, config);
 
                   window.addEventListener('resize', function() {{ Plotly.Plots.resize(gd); }});
@@ -2744,7 +2768,7 @@ if engineering_tab:
                       }}
                       return true; // let Plotly's default legend toggle (hide/show the bar segment) proceed
                   }});
-              }}, 60);
+              }});
           }})();
           </script>
           """
@@ -2925,30 +2949,47 @@ if engineering_tab:
                 var config = {{ displayModeBar: false, responsive: true }};
 
                 var gd = document.getElementById('{div_id}');
-                Plotly.newPlot(gd, [traceClosed, traceOpen, traceReopen, traceTotal], layout, config);
 
-                // Fix: force a layout recompute shortly after paint, since Plotly
-                // sometimes measures this iframe's width before it's settled to
-                // its real size, causing the horizontal legend to overlap.
-                setTimeout(function() {{ Plotly.Plots.resize(gd); }}, 80);
-                window.addEventListener('resize', function() {{ Plotly.Plots.resize(gd); }});
+                // Fix: Plotly caches the legend's text-fitting boxes on its first
+                // layout pass. Plotting immediately then calling resize() after a
+                // fixed delay doesn't redo that legend text-fit calculation, so
+                // it can stay truncated. Instead, wait until the container's
+                // width is actually unchanged across two animation frames before
+                // ever calling Plotly.newPlot.
+                function waitForStableWidth(el, cb, tries) {{
+                    tries = tries || 0;
+                    var w1 = el.offsetWidth;
+                    requestAnimationFrame(function() {{
+                        var w2 = el.offsetWidth;
+                        if ((w1 === w2 && w1 > 0) || tries > 40) {{
+                            cb();
+                        }} else {{
+                            waitForStableWidth(el, cb, tries + 1);
+                        }}
+                    }});
+                }}
 
-                var visible = [true, true, true];  // Closed, Open, Reopened
+                waitForStableWidth(gd, function() {{
+                    Plotly.newPlot(gd, [traceClosed, traceOpen, traceReopen, traceTotal], layout, config);
+                    window.addEventListener('resize', function() {{ Plotly.Plots.resize(gd); }});
 
-                gd.on('plotly_legendclick', function(data) {{
-                    var idx = data.curveNumber;
-                    if (idx < 3) {{
-                        visible[idx] = !visible[idx];
-                        var newTotals = categories.map(function(_, i) {{
-                            var sum = 0;
-                            if (visible[0]) sum += closedVals[i];
-                            if (visible[1]) sum += openVals[i];
-                            if (visible[2]) sum += reopenVals[i];
-                            return sum;
-                        }});
-                        Plotly.restyle(gd, {{ x: [newTotals], text: [newTotals.map(String)] }}, [3]);
-                    }}
-                    return true;
+                    var visible = [true, true, true];  // Closed, Open, Reopened
+
+                    gd.on('plotly_legendclick', function(data) {{
+                        var idx = data.curveNumber;
+                        if (idx < 3) {{
+                            visible[idx] = !visible[idx];
+                            var newTotals = categories.map(function(_, i) {{
+                                var sum = 0;
+                                if (visible[0]) sum += closedVals[i];
+                                if (visible[1]) sum += openVals[i];
+                                if (visible[2]) sum += reopenVals[i];
+                                return sum;
+                            }});
+                            Plotly.restyle(gd, {{ x: [newTotals], text: [newTotals.map(String)] }}, [3]);
+                        }}
+                        return true;
+                    }});
                 }});
             }})();
             </script>
