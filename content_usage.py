@@ -134,6 +134,53 @@ def get_content_engagement_distribution():
     return _df("content_engagement_distribution")
 
 
+def get_content_category_distribution():
+    """content_category_distribution view -> content_category, is_premium_content,
+    total_activities, unique_content, unique_users. One row per category x Free/Premium."""
+    return _df("content_category_distribution")
+
+
+def get_content_category_type_breakdown():
+    """content_category_type_breakdown view -> content_category, is_premium_content,
+    content_type, total_activities, unique_content. Used to build the content-type mix
+    shown in the Category Distribution chart's hover, split by Free/Premium."""
+    return _df("content_category_type_breakdown")
+
+
+def get_content_premium_free_distinct_count():
+    """content_premium_free_distinct_count view -> is_premium_content, unique_content.
+    One row for Free, one for Premium — distinct content_id count per tier."""
+    return _df("content_premium_free_distinct_count")
+
+
+def get_content_type_distribution():
+    """content_type_distribution view -> content_type, is_premium_content, unique_content,
+    total_interactions, unique_users. One row per content_type x Free/Premium — the
+    corrected replacement for Product Usage's old (buggily-scoped) Content Usage chart."""
+    return _df("content_type_distribution")
+
+
+def get_content_type_event_breakdown():
+    """content_type_event_breakdown view -> content_type, is_premium_content, event_type,
+    event_count. Used to build the event-type mix shown in the Content Type Distribution
+    chart's hover, split by Free/Premium."""
+    return _df("content_type_event_breakdown")
+
+
+def get_content_lifecycle_curve():
+    """content_lifecycle_curve view -> days_since_first_use, total_engagement,
+    active_content_items. Shows how engagement trends across all content items relative
+    to each item's own first-use date (day 0, day 1, day 2...)."""
+    return _df("content_lifecycle_curve")
+
+
+def get_content_language_category_breakdown():
+    """content_language_category_breakdown view -> language_name, content_category,
+    total_engagement, unique_content. Used to add a category mix to the hover of the
+    Engagement by Language chart."""
+    return _df("content_language_category_breakdown")
+
+
 # ============================================================
 # 📝 MAIN ENTRY POINT
 # ============================================================
@@ -246,6 +293,31 @@ def show_content_usage():
         fig2.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
         fig2.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
         st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+
+        # Event-type totals — moved here from Product Usage's old "Event Usage"
+        # section, placed alongside this trend chart instead of on its own.
+        event_totals = {
+            "Downloads": kpis.get("downloads", 0) or 0,
+            "Saves": kpis.get("saves", 0) or 0,
+            "Likes": kpis.get("likes", 0) or 0,
+            "Shares": kpis.get("shares", 0) or 0,
+            "Cobrand": kpis.get("cobrands", 0) or 0,
+        }
+        top_event_label = max(event_totals, key=event_totals.get)
+        top_event_count = event_totals[top_event_label]
+        ev1, ev2, ev3, ev4, ev5 = st.columns(5)
+        ev1.metric("Downloads", f"{event_totals['Downloads']:,}")
+        ev2.metric("Saves", f"{event_totals['Saves']:,}")
+        ev3.metric("Likes", f"{event_totals['Likes']:,}")
+        ev4.metric("Shares", f"{event_totals['Shares']:,}")
+        ev5.metric("Cobrand", f"{event_totals['Cobrand']:,}")
+        st.markdown(
+            insight_box(
+                f"<b>{top_event_label}</b> is the most common event type with <b>{top_event_count:,}</b> total occurrences.",
+                title="Event Insight",
+            ),
+            unsafe_allow_html=True,
+        )
     else:
         st.info("No event-type trend data available.")
     chart_card_close()
@@ -278,35 +350,111 @@ def show_content_usage():
         fig3.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
         fig3.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
         st.plotly_chart(fig3, use_container_width=True, config={"displayModeBar": False})
+
+        # Premium/Basic distinct content counts — moved here from Product Usage's
+        # old "Premium vs Basic Content" section, placed alongside this chart.
+        # Shows DISTINCT content_id count per tier, not engagement/interaction totals.
+        df_tier_counts = get_content_premium_free_distinct_count()
+        premium_n = 0
+        basic_n = 0
+        if df_tier_counts is not None and not df_tier_counts.empty:
+            df_tier_counts = df_tier_counts.copy()
+            df_tier_counts["is_premium_content"] = df_tier_counts["is_premium_content"].fillna(False)
+            premium_row = df_tier_counts[df_tier_counts["is_premium_content"] == True]
+            basic_row = df_tier_counts[df_tier_counts["is_premium_content"] == False]
+            premium_n = int(premium_row["unique_content"].iloc[0]) if not premium_row.empty else 0
+            basic_n = int(basic_row["unique_content"].iloc[0]) if not basic_row.empty else 0
+        total_tier_content = premium_n + basic_n
+        premium_tier_pct = round(premium_n / total_tier_content * 100, 1) if total_tier_content else 0.0
+        basic_tier_pct = round(basic_n / total_tier_content * 100, 1) if total_tier_content else 0.0
+        tier_c1, tier_c2 = st.columns(2)
+        tier_c1.metric("Premium Distinct Content", f"{premium_n:,}", f"{premium_tier_pct}% of total", delta_color="off")
+        tier_c2.metric("Basic Distinct Content", f"{basic_n:,}", f"{basic_tier_pct}% of total", delta_color="off")
     else:
         st.info("No premium/free trend data available.")
     chart_card_close()
     st.markdown("<br>", unsafe_allow_html=True)
 
     # --------------------------------------------------------
-    # CONTENT LIBRARY SIZE BY TYPE
-    # (genuinely new vs Product Usage's Content Usage chart —
-    # that one shows engagement/interactions per type, this shows
-    # how many DISTINCT content items exist per type, plus how
-    # efficiently each type's library converts to engagement)
+    # CONTENT TYPE DISTRIBUTION
+    # Replaces the old "Content Library Size by Type" chart — that one used a
+    # view without unique-content-vs-content_type nuance and duplicated what
+    # Product Usage's (buggily-scoped) Content Usage chart was trying to show.
+    # This version: distinct content items used per content_type, stacked by
+    # Free/Premium, with total interactions/unique users/event-type mix on hover.
     # --------------------------------------------------------
-    chart_card_open("Content Library Size by Type", "How many distinct content items exist per type, and how much engagement each piece drives on average.")
-    df_type = get_content_type_usage()
-    if df_type is not None and not df_type.empty:
-        df_type = df_type.copy()
-        df_type["avg_engagement_per_item"] = (df_type["total_engagement"] / df_type["total_content"].replace(0, np.nan)).round(1)
-        df_type_sorted = df_type.sort_values("total_content", ascending=True)
-        fig4 = px.bar(df_type_sorted, x="total_content", y="content_type", orientation="h")
-        fig4.update_traces(
-            marker_color=PURPLE,
-            customdata=df_type_sorted[["total_engagement", "avg_engagement_per_item", "unique_users"]],
-            hovertemplate=(
-                "<b>%{y}</b><br>Content Items: %{x}<br>Total Engagement: %{customdata[0]:,}"
-                "<br>Avg Engagement/Item: %{customdata[1]:,.1f}<br>Unique Users: %{customdata[2]:,}<extra></extra>"
-            ),
+    chart_card_open("Content Type Distribution", "Distinct content items used per content type, split by Free vs Premium. Hover a segment for interactions, unique users, and event-type mix.")
+    df_ctype = get_content_type_distribution()
+    df_ctype_events = get_content_type_event_breakdown()
+
+    if df_ctype is not None and not df_ctype.empty:
+        df_ctype = df_ctype.copy()
+        df_ctype["is_premium_content"] = df_ctype["is_premium_content"].fillna(False)
+
+        event_text_by_segment = {}
+        if df_ctype_events is not None and not df_ctype_events.empty:
+            df_ctype_events = df_ctype_events.copy()
+            df_ctype_events["is_premium_content"] = df_ctype_events["is_premium_content"].fillna(False)
+            for (ctype, is_prem), grp in df_ctype_events.groupby(["content_type", "is_premium_content"]):
+                top = grp.sort_values("event_count", ascending=False)
+                lines = [f"{row['event_type']}: {row['event_count']:,}" for _, row in top.iterrows()]
+                event_text_by_segment[(ctype, bool(is_prem))] = "<br>".join(lines)
+
+        ctype_order = (
+            df_ctype.groupby("content_type")["unique_content"].sum()
+            .sort_values(ascending=True).index.tolist()
         )
-        fig4 = style_bar_chart(fig4, height=280)
-        fig4.update_layout(xaxis_title="Distinct Content Items", yaxis_title="")
+
+        def _ctype_segment(is_premium):
+            seg = df_ctype[df_ctype["is_premium_content"] == is_premium].set_index("content_type")
+            seg = seg.reindex(ctype_order).fillna(0)
+            hover = []
+            for ctype in ctype_order:
+                event_text = event_text_by_segment.get((ctype, is_premium), "No breakdown available")
+                hover.append(
+                    f"<b>{ctype}</b> — {'Premium' if is_premium else 'Free'}"
+                    f"<br>Distinct Content Used: {int(seg.loc[ctype, 'unique_content']):,}"
+                    f"<br>Total Interactions: {int(seg.loc[ctype, 'total_interactions']):,}"
+                    f"<br>Unique Users: {int(seg.loc[ctype, 'unique_users']):,}"
+                    f"<br><br><b>Event Type Mix ({'Premium' if is_premium else 'Free'})</b><br>{event_text}"
+                )
+            return seg, hover
+
+        ctype_free_seg, ctype_free_hover = _ctype_segment(False)
+        ctype_premium_seg, ctype_premium_hover = _ctype_segment(True)
+
+        fig4 = go.Figure()
+        fig4.add_trace(go.Bar(
+            y=ctype_order, x=ctype_free_seg["unique_content"], name="Free", orientation="h",
+            marker_color=GREEN, marker_line_width=0,
+            text=ctype_free_seg["unique_content"].astype(int), textposition="inside", insidetextanchor="middle",
+            textfont=dict(size=11, color="white"),
+            hovertext=ctype_free_hover, hoverinfo="text",
+        ))
+        fig4.add_trace(go.Bar(
+            y=ctype_order, x=ctype_premium_seg["unique_content"], name="Premium", orientation="h",
+            marker_color=AMBER, marker_line_width=0,
+            text=ctype_premium_seg["unique_content"].astype(int), textposition="inside", insidetextanchor="middle",
+            textfont=dict(size=11, color="white"),
+            hovertext=ctype_premium_hover, hoverinfo="text",
+        ))
+        ctype_totals = (ctype_free_seg["unique_content"] + ctype_premium_seg["unique_content"]).astype(int)
+        fig4.add_trace(go.Scatter(
+            y=ctype_order, x=ctype_totals, mode="text",
+            text=ctype_totals.map(lambda v: f"{v:,}"), textposition="middle right",
+            textfont=dict(size=11, color="#0F172A", family="Manrope"),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig4.update_layout(
+            barmode="stack", height=320, **CHART_BG, font=FONT,
+            margin=dict(l=12, r=60, t=10, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                        font=dict(size=11, color="#0F172A")),
+            hoverlabel=HOVER_LABEL,
+            xaxis_title="Distinct Content Items Used", yaxis_title="",
+        )
+        fig4.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT, range=[0, ctype_totals.max() * 1.12] if len(ctype_totals) else None)
+        fig4.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
         st.plotly_chart(fig4, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No content type data available.")
@@ -314,10 +462,95 @@ def show_content_usage():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # --------------------------------------------------------
+    # CATEGORY DISTRIBUTION — stacked by Free/Premium, with content
+    # type mix and unique users surfaced in the hover.
+    # --------------------------------------------------------
+    chart_card_open("Content Category Distribution", "Total activity per content category, split by Free vs Premium. Hover a segment for its content type mix and unique users.")
+    df_cat = get_content_category_distribution()
+    df_type_breakdown = get_content_category_type_breakdown()
+
+    if df_cat is not None and not df_cat.empty:
+        df_cat = df_cat.copy()
+        df_cat["is_premium_content"] = df_cat["is_premium_content"].fillna(False)
+
+        # Pre-format a "top content types" string per (category, is_premium) pair,
+        # now that the breakdown view itself is split by Free/Premium.
+        type_text_by_segment = {}
+        if df_type_breakdown is not None and not df_type_breakdown.empty:
+            df_type_breakdown = df_type_breakdown.copy()
+            df_type_breakdown["is_premium_content"] = df_type_breakdown["is_premium_content"].fillna(False)
+            for (cat, is_prem), grp in df_type_breakdown.groupby(["content_category", "is_premium_content"]):
+                top = grp.sort_values("total_activities", ascending=False).head(5)
+                lines = [f"{row['content_type']}: {row['total_activities']:,}" for _, row in top.iterrows()]
+                type_text_by_segment[(cat, bool(is_prem))] = "<br>".join(lines)
+
+        order = (
+            df_cat.groupby("content_category")["total_activities"].sum()
+            .sort_values(ascending=True).index.tolist()
+        )
+
+        def _segment(is_premium):
+            seg = df_cat[df_cat["is_premium_content"] == is_premium].set_index("content_category")
+            seg = seg.reindex(order).fillna(0)
+            hover = []
+            for cat in order:
+                type_text = type_text_by_segment.get((cat, is_premium), "No breakdown available")
+                hover.append(
+                    f"<b>{cat}</b> — {'Premium' if is_premium else 'Free'}"
+                    f"<br>Activities: {int(seg.loc[cat, 'total_activities']):,}"
+                    f"<br>Unique Content: {int(seg.loc[cat, 'unique_content']):,}"
+                    f"<br>Unique Users: {int(seg.loc[cat, 'unique_users']):,}"
+                    f"<br><br><b>Content Type Mix ({'Premium' if is_premium else 'Free'})</b><br>{type_text}"
+                )
+            return seg, hover
+
+        free_seg, free_hover = _segment(False)
+        premium_seg, premium_hover = _segment(True)
+
+        fig_cat = go.Figure()
+        fig_cat.add_trace(go.Bar(
+            y=order, x=free_seg["total_activities"], name="Free", orientation="h",
+            marker_color=GREEN, marker_line_width=0,
+            text=free_seg["unique_content"].astype(int), textposition="inside", insidetextanchor="middle",
+            texttemplate="%{text:,} content", textfont=dict(size=10, color="white"),
+            hovertext=free_hover, hoverinfo="text",
+        ))
+        fig_cat.add_trace(go.Bar(
+            y=order, x=premium_seg["total_activities"], name="Premium", orientation="h",
+            marker_color=AMBER, marker_line_width=0,
+            text=premium_seg["unique_content"].astype(int), textposition="inside", insidetextanchor="middle",
+            texttemplate="%{text:,} content", textfont=dict(size=10, color="white"),
+            hovertext=premium_hover, hoverinfo="text",
+        ))
+        cat_totals = (free_seg["total_activities"] + premium_seg["total_activities"]).astype(int)
+        fig_cat.add_trace(go.Scatter(
+            y=order, x=cat_totals, mode="text",
+            text=cat_totals.map(lambda v: f"{v:,}"), textposition="middle right",
+            textfont=dict(size=11, color="#0F172A", family="Manrope"),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig_cat.update_layout(
+            barmode="stack", height=340, **CHART_BG, font=FONT,
+            margin=dict(l=12, r=60, t=10, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                        font=dict(size=11, color="#0F172A")),
+            hoverlabel=HOVER_LABEL,
+            xaxis_title="Total Activities", yaxis_title="",
+        )
+        fig_cat.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT, range=[0, cat_totals.max() * 1.12] if len(cat_totals) else None)
+        fig_cat.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+        st.plotly_chart(fig_cat, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.info("No content category data available.")
+    chart_card_close()
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------
     # LANGUAGE BREAKDOWN
     # --------------------------------------------------------
-    chart_card_open("Engagement by Language", "Total engagement and content library size per language.")
+    chart_card_open("Engagement by Language", "Total engagement and content library size per language. Hover a bar for its category mix.")
     df_dist = get_content_engagement_distribution()
+    df_lang_cat = get_content_language_category_breakdown()
     if df_dist is not None and not df_dist.empty and "language_name" in df_dist.columns:
         df_lang = (
             df_dist.groupby("language_name")
@@ -325,14 +558,24 @@ def show_content_usage():
             .reset_index()
         )
         df_lang["avg_engagement_per_item"] = (df_lang["total_engagement"] / df_lang["content_count"].replace(0, np.nan)).round(1)
+
+        category_text_by_language = {}
+        if df_lang_cat is not None and not df_lang_cat.empty:
+            for lang, grp in df_lang_cat.groupby("language_name"):
+                top_cats = grp.sort_values("total_engagement", ascending=False).head(5)
+                lines = [f"{row['content_category']}: {row['total_engagement']:,}" for _, row in top_cats.iterrows()]
+                category_text_by_language[lang] = "<br>".join(lines)
+        df_lang["category_mix"] = df_lang["language_name"].map(category_text_by_language).fillna("No breakdown available")
+
         df_lang_sorted = df_lang.sort_values("total_engagement", ascending=True)
         fig5 = px.bar(df_lang_sorted, x="total_engagement", y="language_name", orientation="h")
         fig5.update_traces(
             marker_color=BLUE,
-            customdata=df_lang_sorted[["content_count", "avg_engagement_per_item"]],
+            customdata=df_lang_sorted[["content_count", "avg_engagement_per_item", "category_mix"]],
             hovertemplate=(
                 "<b>%{y}</b><br>Total Engagement: %{x:,}<br>Content Items: %{customdata[0]:,}"
-                "<br>Avg Engagement/Item: %{customdata[1]:,.1f}<extra></extra>"
+                "<br>Avg Engagement/Item: %{customdata[1]:,.1f}"
+                "<br><br><b>Category Mix</b><br>%{customdata[2]}<extra></extra>"
             ),
         )
         fig5 = style_bar_chart(fig5, height=260)
@@ -340,6 +583,62 @@ def show_content_usage():
         st.plotly_chart(fig5, use_container_width=True, config={"displayModeBar": False})
     else:
         st.info("No language data available.")
+    chart_card_close()
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------
+    # CONTENT LIFECYCLE / DECAY CURVE
+    # How engagement trends relative to each content item's own first-use
+    # date (day 0, day 1, day 2...) — reveals whether content gets heavy use
+    # right away and fades, or has a longer tail of ongoing relevance.
+    # --------------------------------------------------------
+    chart_card_open("Content Lifecycle / Decay Curve", "Engagement across all content items, measured in days since each item's own first use — not calendar time. Capped to the first 90 days to keep the long tail from thinning out.")
+    df_lifecycle = get_content_lifecycle_curve()
+    if df_lifecycle is not None and not df_lifecycle.empty:
+        df_lifecycle = df_lifecycle[
+            (df_lifecycle["days_since_first_use"] >= 0) & (df_lifecycle["days_since_first_use"] <= 90)
+        ].sort_values("days_since_first_use")
+
+        fig6 = go.Figure()
+        fig6.add_trace(go.Bar(
+            x=df_lifecycle["days_since_first_use"], y=df_lifecycle["total_engagement"], name="Engagement",
+            marker_color=GREEN, marker_line_width=0, opacity=0.55, yaxis="y2",
+            hovertemplate="Day %{x}<br>Engagement: <b>%{y}</b><extra></extra>",
+        ))
+        fig6.add_trace(go.Scatter(
+            x=df_lifecycle["days_since_first_use"], y=df_lifecycle["active_content_items"], name="Active Content Items",
+            mode="lines", line=dict(color=BLUE, width=2.5, shape="spline"), yaxis="y1",
+            hovertemplate="Day %{x}<br>Active Content Items: <b>%{y}</b><extra></extra>",
+        ))
+        fig6.update_layout(
+            height=320, **CHART_BG, font=FONT,
+            margin=dict(l=40, r=40, t=10, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                        font=dict(size=11, color="#0F172A")),
+            hoverlabel=HOVER_LABEL, hovermode="x unified",
+            bargap=0.15,
+            xaxis_title="Days Since First Use",
+            yaxis=dict(title=dict(text="Active Content Items", font=dict(color=BLUE)), tickfont=dict(color=BLUE),
+                       gridcolor=GRID_COLOR, zeroline=False),
+            yaxis2=dict(title=dict(text="Engagement", font=dict(color=GREEN)), tickfont=dict(color=GREEN),
+                        overlaying="y", side="right", showgrid=False, zeroline=False),
+        )
+        fig6.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+        st.plotly_chart(fig6, use_container_width=True, config={"displayModeBar": False})
+
+        day0_engagement = df_lifecycle[df_lifecycle["days_since_first_use"] == 0]["total_engagement"].sum()
+        total_engagement_90d = df_lifecycle["total_engagement"].sum()
+        day0_pct = round(day0_engagement / total_engagement_90d * 100, 1) if total_engagement_90d else 0.0
+        st.markdown(
+            insight_box(
+                f"<b>{day0_pct}%</b> of all engagement in the first 90 days happens on day 0 (the day content is first used) — "
+                f"the rest is spread across the following 90 days.",
+                title="Lifecycle Insight",
+            ),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("No content lifecycle data available.")
     chart_card_close()
     st.markdown("<br>", unsafe_allow_html=True)
 

@@ -2,6 +2,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
+from datetime import date, timedelta
 
 import dashboard_data as dd
 
@@ -136,16 +137,45 @@ def anchor(name):
     st.markdown(f'<div id="{name}" style="position:relative; top:-70px;"></div>', unsafe_allow_html=True)
 
 
+def _resolve_period(period_label):
+    """Converts a period label into (start_date, end_date) as date objects.
+    Returns (None, None) for 'All Time' — meaning no date filtering at all."""
+    today = date.today()
+    if period_label == "This Month":
+        start = today.replace(day=1)
+        end = today
+    elif period_label == "Last Month":
+        first_of_this_month = today.replace(day=1)
+        end = first_of_this_month - timedelta(days=1)
+        start = end.replace(day=1)
+    elif period_label == "This Year":
+        start = today.replace(month=1, day=1)
+        end = today
+    else:  # "All Time"
+        start, end = None, None
+    return start, end
+
+
 def show_product_usage():
     anchor("product-usage-overview")
     st.markdown("<div class='section-header'>Product Usage Overview</div>", unsafe_allow_html=True)
 
-    planner_label = st.radio(
-        "Post Planner", ["With Post Planner", "Without Post Planner"], horizontal=True,
-        label_visibility="collapsed", key="product_usage_planner_toggle",
-    )
+    top_left, top_right = st.columns([3, 1])
+    with top_left:
+        planner_label = st.radio(
+            "Post Planner", ["With Post Planner", "Without Post Planner"], horizontal=True,
+            label_visibility="collapsed", key="product_usage_planner_toggle",
+        )
+    with top_right:
+        period_label = st.selectbox(
+            "Period", ["This Month", "Last Month", "This Year", "All Time"],
+            index=3, key="product_usage_period_filter", label_visibility="collapsed",
+        )
+    period_start, period_end = _resolve_period(period_label)
+
     include_post_planner = planner_label == "With Post Planner"
-    st.caption("Applies to everything below except Feature Usage (Post Planner always shown), and Campaign Performance / Platform Usage (unrelated \u2014 those come from scheduled posts, not activity).")
+    st.caption("Post Planner toggle applies to everything below except Feature Usage (Post Planner always shown), and Campaign Performance / Platform Usage (unrelated \u2014 those come from scheduled posts, not activity). "
+               "Period filter applies to Total Users / Total Activities / Avg Actions per User and most charts below \u2014 DAU/WAU/MAU/Premium Active/Basic Active, Daily Activity Trend, Feature Adoption Depth, Time to First Value, and Top Active Users are unaffected (they have their own fixed windows).")
     st.markdown("<br>", unsafe_allow_html=True)
 
     # --------------------------------------------------------
@@ -160,8 +190,13 @@ def show_product_usage():
     basic_active_pct = round(basic_active / mau * 100, 1) if mau else 0.0
 
     r1 = st.columns(4)
-    r1[0].metric("Total Users", f"{kpis.get('total_users', 0):,}",
-                 _trend(kpis.get('total_users'), kpis.get('total_users_prev')))
+    if period_label == "All Time":
+        r1[0].metric("Total Users", f"{kpis.get('total_users', 0):,}",
+                     _trend(kpis.get('total_users'), kpis.get('total_users_prev')))
+    else:
+        period_kpis = dd.get_product_usage_period_kpis(period_start, period_end, include_post_planner) or {}
+        r1[0].metric("New Users", f"{period_kpis.get('new_users', 0):,}",
+                     help=f"Users who registered during {period_label}.")
     r1[1].metric("DAU", f"{kpis.get('dau', 0):,}",
                  _trend(kpis.get('dau'), kpis.get('dau_prev'), "vs 7 days ago"))
     r1[2].metric("WAU", f"{kpis.get('wau', 0):,}",
@@ -175,11 +210,21 @@ def show_product_usage():
                  help="MAU users with a current Silver/Gold/Platinum/Diamond plan invoice.")
     r2[1].metric("Basic Active", f"{basic_active:,}",
                  _trend(basic_active, kpis.get('basic_active_prev')))
-    r2[2].metric("Total Activities", f"{kpis.get('total_activities', 0):,}",
-                 _trend(kpis.get('total_activities'), kpis.get('total_activities_prev')),
-                 help="All activity events in the last 30 days (platform-wide, not just MAU).")
-    r2[3].metric("Avg Actions/User", f"{kpis.get('avg_actions_per_user', 0):,}",
-                 _trend(kpis.get('avg_actions_per_user'), kpis.get('avg_actions_per_user_prev')))
+    if period_label == "All Time":
+        # NOTE: kpis['total_activities'] from get_product_usage_kpis() is actually
+        # always a fixed last-30-days figure (same pattern as DAU/WAU/MAU) — NOT a
+        # true all-time total. So "All Time" mode also calls the period function
+        # with (None, None), which correctly returns true unfiltered lifetime totals.
+        all_time_kpis = dd.get_product_usage_period_kpis(None, None, include_post_planner) or {}
+        r2[2].metric("Total Activities", f"{all_time_kpis.get('total_activities', 0):,}",
+                     help="All activity events, all time (platform-wide).")
+        r2[3].metric("Avg Actions/User", f"{all_time_kpis.get('avg_actions_per_user', 0) or 0:,}",
+                     help="All-time total activities divided by all-time distinct active users.")
+    else:
+        r2[2].metric("Total Activities", f"{period_kpis.get('total_activities', 0):,}",
+                     help=f"All activity events during {period_label} (platform-wide).")
+        r2[3].metric("Avg Actions/User", f"{period_kpis.get('avg_actions_per_user', 0) or 0:,}",
+                     help=f"Total activities during {period_label} divided by distinct users active in that period.")
 
     engagement_trend = _trend_points(kpis.get('engagement_rate'), kpis.get('engagement_rate_prev'))
     stickiness_trend = _trend_points(kpis.get('stickiness'), kpis.get('stickiness_prev'), "vs 7 days ago")
@@ -234,6 +279,7 @@ def show_product_usage():
             hoverlabel=HOVER_LABEL,
             hovermode="x unified",
             bargap=0.15,
+            dragmode="pan",
             yaxis=dict(
                 title=dict(text="Active Users", font=dict(color=BLUE)),
                 tickfont=dict(color=BLUE),
@@ -246,8 +292,17 @@ def show_product_usage():
                 showgrid=False, zeroline=False,
             ),
         )
-        fig.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        # Show the most recent 90 days by default (matches prior behavior),
+        # but the full dataset is loaded — drag left/right (not scroll/pinch)
+        # to pan through all of history.
+        default_window_start = daily["date"].max() - pd.Timedelta(days=90)
+        fig.update_xaxes(
+            showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT,
+            range=[max(daily["date"].min(), default_window_start), daily["date"].max()],
+            fixedrange=False,
+        )
+        fig.update_yaxes(fixedrange=True)
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": False})
 
         peak = daily.loc[daily["activities"].idxmax()]
         st.markdown(
@@ -265,141 +320,53 @@ def show_product_usage():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # --------------------------------------------------------
-    # FEATURE USAGE  +  CONTENT USAGE
+    # FEATURE USAGE
+    # (was paired 2-up with "Content Usage" — that chart moved to Content
+    # Analytics as the corrected "Content Type Distribution" chart, so
+    # Feature Usage now takes the full row.)
     # --------------------------------------------------------
-    left, right = st.columns(2)
+    anchor("product-usage-feature-usage")
+    chart_card_open("Feature Usage", "Top product features by adoption." if period_label == "All Time" else f"Top product features by adoption — {period_label}.")
+    df_feat = dd.get_feature_usage() if period_label == "All Time" else dd.get_feature_usage_period(period_start, period_end)
+    if df_feat is not None and not df_feat.empty:
+        df_feat_sorted = df_feat.sort_values("events", ascending=True)
 
-    with left:
-        anchor("product-usage-feature-usage")
-        chart_card_open("Feature Usage", "Top product features by adoption.")
-        df_feat = dd.get_feature_usage()
-        if df_feat is not None and not df_feat.empty:
-            df_feat_sorted = df_feat.sort_values("events", ascending=True)
-
-            df_event_for_content = dd.get_event_usage()
-            content_breakdown_lines = ""
-            if df_event_for_content is not None and not df_event_for_content.empty:
-                df_event_sorted_desc = df_event_for_content.sort_values("events", ascending=False)
-                content_breakdown_lines = "<br>".join(
-                    f"{row['event_type']}: {row['events']:,}" for _, row in df_event_sorted_desc.iterrows()
-                )
-
-            hover_texts = []
-            for _, row in df_feat_sorted.iterrows():
-                base = f"<b>{row['feature_type']}</b><br>Events: {row['events']:,}<br>Unique Users: {row['unique_users']:,}"
-                if row["feature_type"] == "Content" and content_breakdown_lines:
-                    base += f"<br><br>By event type:<br>{content_breakdown_lines}"
-                hover_texts.append(base)
-
-            fig = px.bar(df_feat_sorted, x="events", y="feature_type", orientation="h")
-            fig.update_traces(
-                marker_color=BLUE,
-                text=hover_texts,
-                hovertemplate="%{text}<extra></extra>",
+        df_event_for_content = dd.get_event_usage()
+        content_breakdown_lines = ""
+        if df_event_for_content is not None and not df_event_for_content.empty:
+            df_event_sorted_desc = df_event_for_content.sort_values("events", ascending=False)
+            content_breakdown_lines = "<br>".join(
+                f"{row['event_type']}: {row['events']:,}" for _, row in df_event_sorted_desc.iterrows()
             )
-            fig = style_bar_chart(fig, height=280)
-            fig.update_layout(xaxis_title="Total Events", yaxis_title="")
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-            top = df_feat.sort_values("events", ascending=False).iloc[0]
-            st.markdown(
-                insight_box(
-                    f"<b>{top['feature_type']}</b> is the most used feature with "
-                    f"<b>{top['events']:,}</b> events from <b>{top['unique_users']:,}</b> users.",
-                    title="Feature Insight",
-                ),
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info("No feature usage data available.")
-        chart_card_close()
+        hover_texts = []
+        for _, row in df_feat_sorted.iterrows():
+            base = f"<b>{row['feature_type']}</b><br>Events: {row['events']:,}<br>Unique Users: {row['unique_users']:,}"
+            if row["feature_type"] == "Content" and content_breakdown_lines:
+                base += f"<br><br>By event type:<br>{content_breakdown_lines}"
+            hover_texts.append(base)
 
-    with right:
-        anchor("product-usage-content-usage")
-        chart_card_open("Content Usage", "Top content formats by interaction, split by Premium vs Basic.")
-        df_content = dd.get_content_usage(include_post_planner=include_post_planner)
-        if df_content is not None and not df_content.empty:
-            df_content_sorted = df_content.sort_values("interactions", ascending=True)
+        fig = px.bar(df_feat_sorted, x="events", y="feature_type", orientation="h")
+        fig.update_traces(
+            marker_color=BLUE,
+            text=hover_texts,
+            hovertemplate="%{text}<extra></extra>",
+        )
+        fig = style_bar_chart(fig, height=280)
+        fig.update_layout(xaxis_title="Total Events", yaxis_title="")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-            df_content_events = dd.get_content_event_breakdown()
-            event_lines_by_content = {}
-            if df_content_events is not None and not df_content_events.empty:
-                for content_type_val, group in df_content_events.groupby("content_type"):
-                    group_sorted = group.sort_values("events", ascending=False)
-                    event_lines_by_content[content_type_val] = "<br>".join(
-                        f"{row['event_type']}: {row['events']:,}" for _, row in group_sorted.iterrows()
-                    )
-
-            hover_texts = []
-            for _, row in df_content_sorted.iterrows():
-                base = (
-                    f"<b>{row['content_type']}</b><br>Interactions: {row['interactions']:,}<br>Unique Users: {row['unique_users']:,}"
-                    f"<br>Premium: {row['premium_engagement']:,}<br>Basic: {row['free_engagement']:,}"
-                )
-                breakdown = event_lines_by_content.get(row["content_type"])
-                if breakdown:
-                    base += f"<br><br>By event type:<br>{breakdown}"
-                hover_texts.append(base)
-
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df_content_sorted["premium_engagement"], y=df_content_sorted["content_type"],
-                name="Premium", orientation="h", marker_color=AMBER,
-                text=hover_texts, hovertemplate="%{text}<extra></extra>",
-            ))
-            fig.add_trace(go.Bar(
-                x=df_content_sorted["free_engagement"], y=df_content_sorted["content_type"],
-                name="Basic", orientation="h", marker_color=GREEN,
-                text=hover_texts, hovertemplate="%{text}<extra></extra>",
-            ))
-            fig.update_layout(
-                barmode="stack", height=280, **CHART_BG, font=FONT,
-                margin=dict(l=12, r=20, t=10, b=30),
-                showlegend=True,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                            font=dict(size=11, color="#0F172A")),
-                hoverlabel=HOVER_LABEL, hovermode="closest",
-                xaxis_title="Interactions", yaxis_title="",
-            )
-            fig.update_xaxes(showgrid=False, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
-            fig.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-            top = df_content.sort_values("interactions", ascending=False).iloc[0]
-            st.markdown(
-                insight_box(
-                    f"<b>{top['content_type']}</b> generated <b>{top['interactions']:,}</b> "
-                    f"interactions from <b>{top['unique_users']:,}</b> unique users.",
-                    title="Content Insight",
-                ),
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info("No content usage data available.")
-        chart_card_close()
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # --------------------------------------------------------
-    # CONTENT PREMIUM / BASIC SPLIT
-    # --------------------------------------------------------
-    anchor("product-usage-premium-basic-content")
-    chart_card_open("Premium vs Basic Content", "Split of content interactions by content tier (excludes Post Planner activity).")
-    df_split = dd.get_content_premium_split(include_post_planner=include_post_planner)
-    if df_split is not None and not df_split.empty:
-        total_interactions = df_split["interactions"].sum()
-        premium_row = df_split[df_split["content_tier"] == "Premium"]
-        basic_row = df_split[df_split["content_tier"] == "Basic"]
-        premium_n = int(premium_row["interactions"].iloc[0]) if not premium_row.empty else 0
-        basic_n = int(basic_row["interactions"].iloc[0]) if not basic_row.empty else 0
-        premium_pct = round(premium_n / total_interactions * 100, 1) if total_interactions else 0.0
-        basic_pct = round(basic_n / total_interactions * 100, 1) if total_interactions else 0.0
-
-        c1, c2 = st.columns(2)
-        c1.metric("Premium Content Interactions", f"{premium_n:,}", f"{premium_pct}% of total", delta_color="off")
-        c2.metric("Basic Content Interactions", f"{basic_n:,}", f"{basic_pct}% of total", delta_color="off")
+        top = df_feat.sort_values("events", ascending=False).iloc[0]
+        st.markdown(
+            insight_box(
+                f"<b>{top['feature_type']}</b> is the most used feature with "
+                f"<b>{top['events']:,}</b> events from <b>{top['unique_users']:,}</b> users.",
+                title="Feature Insight",
+            ),
+            unsafe_allow_html=True,
+        )
     else:
-        st.info("No content-tier data available.")
+        st.info("No feature usage data available.")
     chart_card_close()
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -410,33 +377,55 @@ def show_product_usage():
 
     with left:
         anchor("product-usage-campaign-performance")
-        chart_card_open("Campaign Performance", "Overall scheduled-post publishing performance.")
-        camp = dd.get_campaign_performance() or {}
+        chart_card_open("Campaign Performance", "Overall scheduled-post publishing performance." if period_label == "All Time" else f"Scheduled-post publishing performance — {period_label} (failure-rate trend below always stays all-time).")
+        camp = dd.get_campaign_performance() or {}  # always fetched — failure_rate_* fields below are never period-filtered
+
+        if period_label != "All Time":
+            camp_period = dd.get_campaign_performance_period(period_start, period_end) or {}
+            # Override just the simple counts with period-scoped values; camp (and its
+            # failure_rate_*/curr30d/prev30d fields) stays as the all-time fallback.
+            total_scheduled_posts_display = camp_period.get('total_scheduled_posts', 0)
+            posted_display = camp_period.get('posted', 0) or 0
+            failed_display = camp_period.get('failed', 0) or 0
+            pending_display = camp_period.get('pending', 0) or 0
+            scheduled_display = camp_period.get('scheduled', 0) or 0
+            publishing_success_rate_display = camp_period.get('publishing_success_rate', 0) or 0
+            automation_rate_display = camp_period.get('automation_rate', 0) or 0
+            show_trends = False
+        else:
+            total_scheduled_posts_display = camp.get('total_scheduled_posts', 0)
+            posted_display = camp.get('posted', 0) or 0
+            failed_display = camp.get('failed', 0) or 0
+            pending_display = camp.get('pending', 0) or 0
+            scheduled_display = camp.get('scheduled', 0) or 0
+            publishing_success_rate_display = camp.get('publishing_success_rate', 0) or 0
+            automation_rate_display = camp.get('automation_rate', 0) or 0
+            show_trends = True
 
         c1, c2 = st.columns(2)
-        c1.metric("Total Scheduled Posts", f"{camp.get('total_scheduled_posts', 0):,}",
-                  _trend(camp.get('total_scheduled_posts_curr30d'), camp.get('total_scheduled_posts_prev30d'), "new vs last 30d"),
-                  help="Distinct scheduled_id — one piece of content, regardless of how many platforms it went to. Trend = new posts scheduled in the last 30 days vs the 30 days before that.")
+        c1.metric("Total Scheduled Posts", f"{total_scheduled_posts_display:,}",
+                  _trend(camp.get('total_scheduled_posts_curr30d'), camp.get('total_scheduled_posts_prev30d'), "new vs last 30d") if show_trends else None,
+                  help="Distinct scheduled_id — one piece of content, regardless of how many platforms it went to." + (" Trend = new posts scheduled in the last 30 days vs the 30 days before that." if show_trends else f" Scoped to {period_label}."))
 
         total_rows = camp.get('total_scheduled_rows', 0) or 0
-        posted = camp.get('posted', 0) or 0
-        pending = camp.get('pending', 0) or 0
-        scheduled = camp.get('scheduled', 0) or 0
-        failed = camp.get('failed', 0) or 0
+        posted = posted_display
+        pending = pending_display
+        scheduled = scheduled_display
+        failed = failed_display
         posted_pct = round(posted / total_rows * 100, 1) if total_rows else 0.0
         pending_pct = round(pending / total_rows * 100, 1) if total_rows else 0.0
         scheduled_pct = round(scheduled / total_rows * 100, 1) if total_rows else 0.0
         failed_pct = round(failed / total_rows * 100, 1) if total_rows else 0.0
 
-        posted_trend = _trend(camp.get('posted_curr30d'), camp.get('posted_prev30d'), "vs last 30d")
-        pending_trend = _trend(camp.get('pending_curr30d'), camp.get('pending_prev30d'), "vs last 30d")
-        scheduled_trend = _trend(camp.get('scheduled_curr30d'), camp.get('scheduled_prev30d'), "vs last 30d")
-        failed_trend = _trend_points(camp.get('failure_rate_alltime'), camp.get('failure_rate_excl_last_30d'), "vs before last 30d")
-        success_trend = _trend_points(camp.get('publishing_success_rate_curr30d'), camp.get('publishing_success_rate_prev30d'), "vs last 30d")
-        automation_trend = _trend_points(camp.get('automation_rate_curr30d'), camp.get('automation_rate_prev30d'), "vs last 30d")
+        posted_trend = _trend(camp.get('posted_curr30d'), camp.get('posted_prev30d'), "vs last 30d") if show_trends else None
+        pending_trend = _trend(camp.get('pending_curr30d'), camp.get('pending_prev30d'), "vs last 30d") if show_trends else None
+        scheduled_trend = _trend(camp.get('scheduled_curr30d'), camp.get('scheduled_prev30d'), "vs last 30d") if show_trends else None
+        failed_trend = _trend_points(camp.get('failure_rate_alltime'), camp.get('failure_rate_excl_last_30d'), "vs before last 30d") if show_trends else None
+        success_trend = _trend_points(camp.get('publishing_success_rate_curr30d'), camp.get('publishing_success_rate_prev30d'), "vs last 30d") if show_trends else None
+        automation_trend = _trend_points(camp.get('automation_rate_curr30d'), camp.get('automation_rate_prev30d'), "vs last 30d") if show_trends else None
 
         c2.metric("Posted", f"{posted:,}", posted_trend,
-                  help=f"{posted_pct}% of total row-level attempts. Trend compares scheduled_for in the last 30 days vs the 30 days before that.")
+                  help=(f"{posted_pct}% of total row-level attempts." + (" Trend compares scheduled_for in the last 30 days vs the 30 days before that." if show_trends else f" Scoped to {period_label} (by scheduled_for).")))
         c3, c4 = st.columns(2)
         c3.metric("Pending", f"{pending:,}", pending_trend, delta_color="inverse",
                   help=f"{pending_pct}% of total.")
@@ -444,13 +433,13 @@ def show_product_usage():
                   help=f"{scheduled_pct}% of total.")
         c5, c6 = st.columns(2)
         c5.metric("Failed", f"{failed:,}", failed_trend, delta_color="inverse",
-                  help=f"{failed_pct}% of total. Trend = overall failure rate (all data) minus the failure rate excluding the last 30 days \u2014 shows how much the last 30 days shifted the all-time rate.")
-        c6.metric("Publishing Success", f"{camp.get('publishing_success_rate', 0)}%", success_trend)
+                  help=f"{failed_pct}% of total." + (" Trend = overall failure rate (all data) minus the failure rate excluding the last 30 days \u2014 shows how much the last 30 days shifted the all-time rate." if show_trends else ""))
+        c6.metric("Publishing Success", f"{publishing_success_rate_display}%", success_trend)
         c7, c8 = st.columns(2)
-        c7.metric("Automation Rate", f"{camp.get('automation_rate', 0)}%", automation_trend)
+        c7.metric("Automation Rate", f"{automation_rate_display}%", automation_trend)
         c8.empty()
 
-        with st.expander("Failure rate over time"):
+        with st.expander("Failure rate over time (always all-time \u2014 not affected by the period filter)"):
             fr1, fr2, fr3, fr4, fr5 = st.columns(5)
             fr1.metric("1-7 Days", f"{camp.get('failure_rate_1_7d', 0)}%")
             fr2.metric("1-15 Days", f"{camp.get('failure_rate_1_15d', 0)}%")
@@ -458,9 +447,14 @@ def show_product_usage():
             fr4.metric("1-60 Days", f"{camp.get('failure_rate_1_60d', 0)}%")
             fr5.metric("1-90 Days", f"{camp.get('failure_rate_1_90d', 0)}%")
 
-        status_by_platform = dd.get_status_by_platform()
+        status_by_platform = (
+            dd.get_status_by_platform()
+            if period_label == "All Time"
+            else dd.get_status_by_platform_period(period_start, period_end)
+        )
         if status_by_platform is not None and not status_by_platform.empty:
-            with st.expander("Status breakdown by platform"):
+            expander_label = "Status breakdown by platform" if period_label == "All Time" else f"Status breakdown by platform — {period_label}"
+            with st.expander(expander_label):
                 pivot = (
                     status_by_platform.pivot(index="posting_status", columns="platform_name", values="count")
                     .fillna(0).astype(int)
@@ -469,9 +463,9 @@ def show_product_usage():
 
         st.markdown(
             insight_box(
-                f"<b>{camp.get('posted', 0):,}</b> posts have gone out successfully "
-                f"(<b>{camp.get('publishing_success_rate', 0)}%</b> success rate). "
-                f"Automated publishing accounts for <b>{camp.get('automation_rate', 0)}%</b> of all scheduled posts.",
+                f"<b>{posted_display:,}</b> posts have gone out successfully "
+                f"(<b>{publishing_success_rate_display}%</b> success rate). "
+                f"Automated publishing accounts for <b>{automation_rate_display}%</b> of all scheduled posts.",
                 title="Campaign Insight",
             ),
             unsafe_allow_html=True,
@@ -480,8 +474,8 @@ def show_product_usage():
 
     with right:
         anchor("product-usage-platform-usage")
-        chart_card_open("Platform Usage", "Scheduled post distribution across publishing platforms.")
-        df_platform = dd.get_platform_usage()
+        chart_card_open("Platform Usage", "Scheduled post distribution across publishing platforms." if period_label == "All Time" else f"Scheduled post distribution across publishing platforms — posts scheduled for {period_label}.")
+        df_platform = dd.get_platform_usage() if period_label == "All Time" else dd.get_platform_usage_period(period_start, period_end)
         if df_platform is not None and not df_platform.empty:
             df_platform_sorted = df_platform.sort_values("posts", ascending=True)
             colors = [PLATFORM_COLORS.get(p, BLUE) for p in df_platform_sorted["platform_name"]]
@@ -516,47 +510,20 @@ def show_product_usage():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # --------------------------------------------------------
-    # EVENT USAGE
+    # (Event Usage chart moved to Content Analytics, placed alongside
+    # its "Engagement by Event Type Over Time" chart.)
     # --------------------------------------------------------
-    anchor("product-usage-event-usage")
-    chart_card_open("Event Usage", "Distribution of user actions on Content features.")
-    df_event = dd.get_event_usage()
-    if df_event is not None and not df_event.empty:
-        df_event_sorted = df_event.sort_values("events", ascending=True)
-        fig = px.bar(df_event_sorted, x="events", y="event_type", orientation="h")
-        fig.update_traces(
-            marker_color=BLUE,
-            customdata=df_event_sorted[["unique_users"]],
-            hovertemplate="<b>%{y}</b><br>Events: %{x:,}<br>Unique Users: %{customdata[0]:,}<extra></extra>",
-        )
-        fig = style_bar_chart(fig, height=280)
-        fig.update_layout(xaxis_title="Total Events", yaxis_title="")
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-        top = df_event.sort_values("events", ascending=False).iloc[0]
-        st.markdown(
-            insight_box(
-                f"<b>{top['event_type']}</b> is the most common user action with "
-                f"<b>{top['events']:,}</b> events generated by <b>{top['unique_users']:,}</b> unique users.",
-                title="Event Insight",
-            ),
-            unsafe_allow_html=True,
-        )
-    else:
-        st.info("No event usage data available.")
-    chart_card_close()
-    st.markdown("<br>", unsafe_allow_html=True)
 
     # --------------------------------------------------------
     # TOP ACTIVE USERS  (All Time / Last 30 Days toggle)
     # --------------------------------------------------------
     anchor("product-usage-top-active-users")
     chart_card_open("Top Active Users", "Users ranked by overall platform activity.")
-    period_label = st.radio(
+    top_users_period_label = st.radio(
         "Period", ["All Time", "Last 30 Days"], horizontal=True, label_visibility="collapsed",
         key="product_usage_top_users_period",
     )
-    period = "30d" if period_label == "Last 30 Days" else "all_time"
+    period = "30d" if top_users_period_label == "Last 30 Days" else "all_time"
 
     df_top = dd.get_top_active_users(period=period, include_post_planner=include_post_planner)
     if df_top is not None and not df_top.empty:
@@ -577,7 +544,7 @@ def show_product_usage():
             insight_box(
                 f"<b>{top_user['user_name'] or 'User ' + str(top_user['user_id'])}</b> from "
                 f"<b>{top_user['company_name'] or 'N/A'}</b> is the platform's most active user "
-                f"({period_label.lower()}) with <b>{top_user['activities']:,}</b> activities, "
+                f"({top_users_period_label.lower()}) with <b>{top_user['activities']:,}</b> activities, "
                 f"<b>{top_user['logins']:,}</b> logins and <b>{top_user['scheduled_posts']:,}</b> scheduled posts.",
                 title="Power User Insight",
             ),
@@ -592,8 +559,8 @@ def show_product_usage():
     # USAGE BY SSO PARTNER
     # --------------------------------------------------------
     anchor("product-usage-sso-partner")
-    chart_card_open("Usage by SSO Partner", "Total users, active users, and engagement rate per acquisition partner.")
-    df_sso = dd.get_sso_partner_usage(include_post_planner=include_post_planner)
+    chart_card_open("Usage by SSO Partner", "Total users, active users, and engagement rate per acquisition partner." if period_label == "All Time" else f"Total users (all-time) vs active users ({period_label}) per acquisition partner.")
+    df_sso = dd.get_sso_partner_usage_period(period_start, period_end, include_post_planner)
     if df_sso is not None and not df_sso.empty:
         df_sso_sorted = df_sso.sort_values("active_users", ascending=True)
         fig = go.Figure(go.Bar(
@@ -689,4 +656,107 @@ def show_product_usage():
             st.markdown(insight_box(insight_text, title="Growth Insight"), unsafe_allow_html=True)
             chart_card_close()
 
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------
+    # FEATURE ADOPTION DEPTH
+    # How many distinct features each user touches, not just how many people
+    # use each feature. A user base clustered at "1 feature" has found exactly
+    # one reason to open the app and no others — a stickiness risk even if
+    # each feature individually looks well-used.
+    # --------------------------------------------------------
+    chart_card_open("Feature Adoption Depth", "How many distinct features each user has touched. Hover a bar for the specific feature combinations behind that count.")
+    df_depth = dd.get_feature_adoption_depth()
+    if df_depth is not None and not df_depth.empty:
+        depth_totals = (
+            df_depth.groupby("distinct_features_used")["user_count"].sum().reset_index()
+            .sort_values("distinct_features_used")
+        )
+
+        combo_text_by_depth = {}
+        for depth, grp in df_depth.groupby("distinct_features_used"):
+            grp_sorted = grp.sort_values("user_count", ascending=False)
+            lines = [f"{row['feature_combination']}: {row['user_count']:,}" for _, row in grp_sorted.iterrows()]
+            combo_text_by_depth[depth] = "<br>".join(lines)
+
+        depth_totals["hover_text"] = depth_totals["distinct_features_used"].map(
+            lambda d: f"<b>{d} feature{'s' if d != 1 else ''}</b><br>Total Users: {int(depth_totals.loc[depth_totals['distinct_features_used'] == d, 'user_count'].iloc[0]):,}<br><br><b>Feature Combinations</b><br>{combo_text_by_depth.get(d, '')}"
+        )
+
+        fig = go.Figure(go.Bar(
+            x=depth_totals["distinct_features_used"].astype(str), y=depth_totals["user_count"],
+            marker_color=BLUE, marker_line_width=0,
+            hovertext=depth_totals["hover_text"], hoverinfo="text",
+        ))
+        fig.update_layout(
+            height=300, **CHART_BG, font=FONT,
+            margin=dict(l=40, r=20, t=10, b=40),
+            showlegend=False, hoverlabel=HOVER_LABEL,
+            xaxis_title="Distinct Features Used", yaxis_title="Users",
+        )
+        fig.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+        fig.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+        total_users_depth = depth_totals["user_count"].sum()
+        single_feature_users = depth_totals[depth_totals["distinct_features_used"] == 1]["user_count"].sum()
+        single_pct = round(single_feature_users / total_users_depth * 100, 1) if total_users_depth else 0.0
+        top_single_combo = combo_text_by_depth.get(1, "").split("<br>")[0] if combo_text_by_depth.get(1) else "N/A"
+        st.markdown(
+            insight_box(
+                f"<b>{single_pct}%</b> of users have only ever used a single feature — most commonly "
+                f"<b>{top_single_combo}</b>. These users have found exactly one reason to open the app; "
+                f"in-app prompts toward a second feature could meaningfully improve stickiness.",
+                title="Adoption Insight",
+            ),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("No feature adoption data available.")
+    chart_card_close()
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------
+    # TIME TO FIRST VALUE
+    # Days between signup and a user's first recorded activity of any kind —
+    # a classic onboarding health metric. A long or fat-tailed distribution
+    # here signals users are signing up but not immediately finding value.
+    # --------------------------------------------------------
+    chart_card_open("Time to First Value", "Days between signup and each user's first recorded activity.")
+    df_ttfv = dd.get_time_to_first_value()
+    if df_ttfv is not None and not df_ttfv.empty:
+        df_ttfv_valid = df_ttfv.dropna(subset=["days_to_first_activity"]).copy()
+        df_ttfv_valid = df_ttfv_valid[df_ttfv_valid["days_to_first_activity"] >= 0]
+        never_activated = int(df_ttfv["days_to_first_activity"].isna().sum())
+
+        if not df_ttfv_valid.empty:
+            same_day = int((df_ttfv_valid["days_to_first_activity"] == 0).sum())
+            within_week = int((df_ttfv_valid["days_to_first_activity"] <= 7).sum())
+            total_valid = len(df_ttfv_valid)
+            median_days = df_ttfv_valid["days_to_first_activity"].median()
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Median Days to First Activity", f"{median_days:.0f}")
+            m2.metric("Same-Day Activation", f"{round(same_day / total_valid * 100, 1)}%")
+            m3.metric("Activated Within 7 Days", f"{round(within_week / total_valid * 100, 1)}%")
+            m4.metric("Never Activated", f"{never_activated:,}")
+
+            capped = df_ttfv_valid[df_ttfv_valid["days_to_first_activity"] <= 30]
+            fig2 = go.Figure(go.Histogram(
+                x=capped["days_to_first_activity"], marker_color=GREEN, marker_line_width=0,
+                hovertemplate="Day: <b>%{x}</b><br>Users: <b>%{y}</b><extra></extra>",
+            ))
+            fig2.update_layout(
+                height=280, **CHART_BG, font=FONT, margin=dict(l=40, r=20, t=10, b=40),
+                showlegend=False, hoverlabel=HOVER_LABEL,
+                xaxis_title="Days to First Activity (capped at 30)", yaxis_title="Users", bargap=0.05,
+            )
+            fig2.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+            fig2.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+            st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.info("No users with a recorded first activity yet.")
+    else:
+        st.info("No time-to-first-value data available.")
+    chart_card_close()
     st.markdown("<br>", unsafe_allow_html=True)

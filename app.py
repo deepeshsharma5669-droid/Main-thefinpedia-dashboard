@@ -17,7 +17,7 @@ from dashboard_data import (
 )
 from dashboard_data import get_upcoming_renewals
 from PIL import Image
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from dashboard_data import (
     get_engineering_issues,
     get_engineering_kpis,
@@ -156,6 +156,20 @@ html, body, [class*="css"] {
     color: #0F172A;
     letter-spacing: -0.3px;
     margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.db-updated-pill {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #0369A1;
+    background: #EFF8FF;
+    border: 1px solid #BAE3FD;
+    border-radius: 999px;
+    padding: 3px 11px;
+    letter-spacing: 0;
+    white-space: nowrap;
 }
 .dash-subtitle {
     font-size: 13px;
@@ -740,6 +754,7 @@ def render_nav_rail():
                 <a href="javascript:void(0)" data-tab="Subscriptions" data-target="subscription-renewal-cohort-trend"><span class="toc-dot"></span>Renewal Cohort Trend</a>
                 <a href="javascript:void(0)" data-tab="Subscriptions" data-target="subscription-renewal-rate-by-plan"><span class="toc-dot"></span>Renewal Rate by Plan</a>
                 <a href="javascript:void(0)" data-tab="Subscriptions" data-target="subscription-renewal-rate-by-partner"><span class="toc-dot"></span>Renewal Rate by Partner</a>
+                <a href="javascript:void(0)" data-tab="Subscriptions" data-target="subscription-non-renewal-insights"><span class="toc-dot"></span>Non-Renewal Insights</a>
             </div>
         </div>
 
@@ -870,12 +885,55 @@ non_premium_revenue_users = kpis["paying_users"] - kpis["premium_users"]
 # ============================================================
 # 🖥️ MAIN DASHBOARD
 # ============================================================
-title_col, settings_col = st.columns([6, 1])
+@st.cache_data(ttl=3600)
+def _get_last_db_update():
+    return dd.get_last_database_update()
+
+_last_update_raw = _get_last_db_update()
+_last_update_display = "Unavailable"
+if _last_update_raw:
+    try:
+        _last_update_display = datetime.strptime(str(_last_update_raw)[:10], "%Y-%m-%d").strftime("%d %b %Y")
+    except Exception:
+        _last_update_display = str(_last_update_raw)
+
+st.markdown("""
+<style>
+.st-key-refresh_btn_wrap button {
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: #FFF1E9;
+    border: 1px solid #FEE0CC;
+    color: #C2410C;
+    line-height: 1;
+}
+.st-key-refresh_btn_wrap button:hover {
+    background: #FFE4D1;
+    border-color: #FDBA8C;
+    color: #9A3412;
+}
+.st-key-refresh_btn_wrap button p {
+    font-size: 14px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+title_col, pill_col, icon_col, _spacer_col, settings_col = st.columns(
+    [2.6, 1.3, 0.3, 5.0, 0.9], gap="small", vertical_alignment="center"
+)
 with title_col:
-    st.markdown("""
-    <div class="dash-title">TheFinPedia Executive Dashboard</div>
-    <div class="dash-subtitle">Revenue, subscriptions and growth performance across plans and partners</div>
-    """, unsafe_allow_html=True)
+    st.markdown('<div class="dash-title" style="margin-bottom:0;">TheFinPedia Executive Dashboard</div>', unsafe_allow_html=True)
+with pill_col:
+    st.markdown(f'<span class="db-updated-pill">Database updated on: {_last_update_display}</span>', unsafe_allow_html=True)
+with icon_col:
+    with st.container(key="refresh_btn_wrap"):
+        if st.button("🔄", key="refresh_dashboard", help="Reload data from the database without losing your place"):
+            st.cache_data.clear()
+            st.rerun()
+
+st.markdown('<div class="dash-subtitle" style="margin-top:2px;">Revenue, subscriptions and growth performance across plans and partners</div>', unsafe_allow_html=True)
 
 if user_role == "Admin":
     with settings_col:
@@ -911,40 +969,91 @@ if revenue_tab:
         with st.sidebar:
             render_nav_rail()
 
+        def _resolve_revenue_period(period_label):
+            """Converts a period label into (start_date, end_date) as date objects.
+            Returns (None, None) for 'All Time' — meaning no date filtering at all."""
+            today = date.today()
+            if period_label == "This Month":
+                start = today.replace(day=1)
+                end = today
+            elif period_label == "Last Month":
+                first_of_this_month = today.replace(day=1)
+                end = first_of_this_month - timedelta(days=1)
+                start = end.replace(day=1)
+            elif period_label == "This Year":
+                start = today.replace(month=1, day=1)
+                end = today
+            else:  # "All Time"
+                start, end = None, None
+            return start, end
+
         anchor("revenue-overview")
-        st.markdown("<div class='section-header'>Revenue Overview</div>", unsafe_allow_html=True)
+        header_left, header_right = st.columns([3, 1])
+        with header_left:
+            st.markdown("<div class='section-header'>Revenue Overview</div>", unsafe_allow_html=True)
+        with header_right:
+            revenue_period_label = st.selectbox(
+                "Period", ["This Month", "Last Month", "This Year", "All Time"],
+                index=3, key="revenue_period_filter", label_visibility="collapsed",
+            )
+        revenue_period_start, revenue_period_end = _resolve_revenue_period(revenue_period_label)
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ---- KPI Row ----
         c1, c2, c3 = st.columns(3)
 
+        revenue_kpis = get_revenue_kpis(revenue_period_start, revenue_period_end)
+        revenue_kpi_suffix = "" if revenue_period_label == "All Time" else f" — {revenue_period_label}"
+
         c1.metric(
-            "Total Revenue",
-            f"₹ {kpis['total_revenue']:,.0f}",
-            help="Gross platform earnings accumulated across all paid subscriber categories, subscription renewals, plan upgrades, and individual top-ups."
+            f"Total Revenue{revenue_kpi_suffix}",
+            f"₹ {revenue_kpis['total_revenue']:,.0f}",
+            help="Gross platform earnings accumulated across all paid subscriber categories, subscription renewals, plan upgrades, and individual top-ups." + ("" if revenue_period_label == "All Time" else f" Scoped to {revenue_period_label} (by billing_period_start_date).")
         )
         c2.metric(
-            "ARPU",
-            f"₹ {kpis['arpu']:,.0f}",
-            help="Average Revenue Per User: Calculated as Total Revenue divided by your total count of active paying or contract-holding accounts."
+            f"ARPU{revenue_kpi_suffix}",
+            f"₹ {revenue_kpis['arpu']:,.0f}",
+            help="Average Revenue Per User: Calculated as Total Revenue divided by your total count of active paying or contract-holding accounts." + ("" if revenue_period_label == "All Time" else f" Scoped to {revenue_period_label} (by billing_period_start_date).")
         )
 
-        c3.metric(
-            "Premium Subscribers",
-            f"{kpis['premium_users']:,}",
-            help="High-value accounts committed to dedicated long-term recurring tiers (e.g., active Silver, Gold, Platinum, or Diamond members)."
-        )
+        subscriber_kpis = get_subscriber_kpis(revenue_period_start, revenue_period_end)
+        if revenue_period_label == "All Time":
+            subscriber_main_label = "Total Subscribers"
+            subscriber_main_value = subscriber_kpis["total_subscribers"]
+            subscriber_tooltip = "All users who have ever paid for a Silver, Gold, Platinum, Diamond, or Trial plan — including expired subscriptions. Active reflects only those whose most recent plan is still within its billing period today."
+        else:
+            subscriber_main_label = "New Subscribers"
+            subscriber_main_value = subscriber_kpis["new_subscribers"]
+            subscriber_tooltip = f"Users whose first-ever Silver/Gold/Platinum/Diamond/Trial subscription started during {revenue_period_label}. Active reflects the current live snapshot, not scoped to this period."
+
+        with c3:
+            st.markdown(f"""
+            <div style="background:white;border:1px solid #EAECF0;border-radius:12px;
+                        padding:16px 20px;height:100%;display:flex;align-items:center;
+                        justify-content:space-between;font-family:'Manrope',sans-serif;"
+                 title="{subscriber_tooltip}">
+                <div style="display:flex;flex-direction:column;gap:4px;">
+                    <span style="font-size:12px;color:#6B7280;font-weight:600;letter-spacing:0.02em;">{subscriber_main_label}</span>
+                    <span style="font-size:28px;font-weight:800;color:#0F172A;letter-spacing:-0.5px;">{subscriber_main_value:,}</span>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;padding-left:16px;
+                            border-left:1px solid #EAECF0;">
+                    <span style="font-size:11px;color:#6B7280;font-weight:600;letter-spacing:0.02em;">Active</span>
+                    <span style="font-size:22px;font-weight:800;color:#2563EB;letter-spacing:-0.4px;">{subscriber_kpis['active_subscribers']:,}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ---- Revenue Breakdown Banner ----
-        df_contrib = get_revenue_contribution()
+        df_contrib = get_revenue_contribution(revenue_period_start, revenue_period_end)
         total_rev = df_contrib["revenue"].sum()
         df_contrib = df_contrib.sort_values("revenue", ascending=False)
 
         breakdown_items = ""
         for _, row in df_contrib.iterrows():
-            pct = round((row["revenue"] / total_rev) * 100, 1)
+            pct = round((row["revenue"] / total_rev) * 100, 1) if total_rev else 0
             breakdown_items += f"""
             <div style="display:flex;flex-direction:column;gap:3px;padding:0 28px;border-left:1px solid #E5E7EB;flex:1;">
                 <span style="font-size:10px;color:#9CA3AF;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;">{row['revenue_type']}</span>
@@ -952,12 +1061,13 @@ if revenue_tab:
                 <span style="font-size:11px;color:#2563EB;font-weight:700;">{pct}% of total</span>
             </div>"""
 
+        breakdown_subtitle = "By subscription type" if revenue_period_label == "All Time" else f"By subscription type — {revenue_period_label}"
         st.components.v1.html(f"""
         <div style="font-family:'Manrope',sans-serif;background:white;border:1px solid #EAECF0;
                     border-radius:12px;padding:18px 24px;display:flex;align-items:center;gap:0;">
             <div style="display:flex;flex-direction:column;gap:3px;padding-right:28px;min-width:130px;flex-shrink:0;">
                 <span style="font-size:10px;color:#9CA3AF;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;">Revenue Breakdown</span>
-                <span style="font-size:12px;color:#6B7280;margin-top:2px;font-weight:500;">By subscription type</span>
+                <span style="font-size:12px;color:#6B7280;margin-top:2px;font-weight:500;">{breakdown_subtitle}</span>
             </div>
             {breakdown_items}
         </div>
@@ -967,13 +1077,13 @@ if revenue_tab:
 
         # ---- Figure 1: Revenue Trend ----
         anchor("monthly-revenue-trend")
-        st.markdown("""
+        st.markdown(f"""
         <div class="chart-card">
-            <div class="figure-title">Daily Revenue Trend</div>
+            <div class="figure-title">Daily Revenue Trend{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
         
         """, unsafe_allow_html=True)
 
-        df = get_revenue_trend_daily()
+        df = get_revenue_trend_daily(revenue_period_start, revenue_period_end)
 
         fig = px.line(df, x="date", y="revenue")
         fig.update_traces(
@@ -1203,12 +1313,12 @@ if revenue_tab:
 
         with c1:
             anchor("revenue-by-plan")
-            st.markdown("""
+            st.markdown(f"""
                    <div class="chart-card">
-                       <div class="figure-title">Revenue by Plan</div>
+                       <div class="figure-title">Revenue by Plan{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
                    """, unsafe_allow_html=True)
 
-            df_plan_cycle = get_plan_revenue_by_cycle()
+            df_plan_cycle = get_plan_revenue_by_cycle(revenue_period_start, revenue_period_end)
             if not df_plan_cycle.empty:
                 unwanted_plans = ["Custom SSO 5.0", "Silver Duplicate 1", "Diamond Plan Duplicate", "Gold Plan Duplicate"]
                 df_plan_clean = df_plan_cycle[~df_plan_cycle["plan_name"].isin(unwanted_plans)].copy()
@@ -1251,12 +1361,12 @@ if revenue_tab:
         with c2:
             anchor("revenue-by-partner")
             with st.container():
-                st.markdown("""
+                st.markdown(f"""
                    <div class="chart-card">
-                       <div class="figure-title">Revenue by Partner</div>
+                       <div class="figure-title">Revenue by Partner{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
                    """, unsafe_allow_html=True)
 
-                df_partner_plan = get_partner_revenue_by_plan()
+                df_partner_plan = get_partner_revenue_by_plan(revenue_period_start, revenue_period_end)
 
                 allowed_plans = ["Diamond Plan", "Platinum Plan", "Silver Plan",
                                  "Trial Plan", "Gold Plan", "Content Top up"]
@@ -1305,13 +1415,13 @@ if revenue_tab:
         debug_conversion_counts()
 
         anchor("monthly-yearly-conversions")
-        st.markdown("""
+        st.markdown(f"""
         <div class="chart-card">
-            <div class="figure-title">Monthly → Yearly Plan Conversions</div>
+            <div class="figure-title">Monthly → Yearly Plan Conversions{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
         
         """, unsafe_allow_html=True)
 
-        df_conv = get_monthly_to_yearly_conversions()
+        df_conv = get_monthly_to_yearly_conversions(revenue_period_start, revenue_period_end)
 
         if not df_conv.empty:
             total_users = len(df_conv)
@@ -1395,28 +1505,67 @@ if revenue_tab:
 # ═══════════════════════════════════════════════════════
 if subscription_tab:
     with subscription_tab:
+        def _resolve_subscription_period(period_label):
+            """Converts a period label into (start_date, end_date) as date objects.
+            Returns (None, None) for 'All Time' — meaning no date filtering at all."""
+            today = date.today()
+            if period_label == "This Month":
+                start = today.replace(day=1)
+                end = today
+            elif period_label == "Last Month":
+                first_of_this_month = today.replace(day=1)
+                end = first_of_this_month - timedelta(days=1)
+                start = end.replace(day=1)
+            elif period_label == "This Year":
+                start = today.replace(month=1, day=1)
+                end = today
+            else:  # "All Time"
+                start, end = None, None
+            return start, end
+
         anchor("subscription-overview")
-        st.markdown("<div class='section-header'>Subscription Overview</div>", unsafe_allow_html=True)
+        sub_header_left, sub_header_right = st.columns([3, 1])
+        with sub_header_left:
+            st.markdown("<div class='section-header'>Subscription Overview</div>", unsafe_allow_html=True)
+        with sub_header_right:
+            subscription_period_label = st.selectbox(
+                "Period", ["This Month", "Last Month", "This Year", "All Time"],
+                index=3, key="subscription_period_filter", label_visibility="collapsed",
+            )
+        subscription_period_start, subscription_period_end = _resolve_subscription_period(subscription_period_label)
+        subscription_period_suffix = "" if subscription_period_label == "All Time" else f" — {subscription_period_label}"
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ---- KPI Row ----
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Users", f"{kpis['total_users']:,}")
-        c2.metric("Premium Conversion", f"{conversion_rate}%",
-                  help="Percentage of total users who have converted to a premium plan.")
-        c3.metric("Renewal Rate", f"{renewal['renewal_rate']}%",
-                  help="Percentage of subscribers who returned for another billing cycle.")
 
-        renewed_split = get_renewed_users_by_cycle()
+        sub_user_kpis = get_user_kpis(subscription_period_start, subscription_period_end)
+        sub_renewal_kpis = get_renewal_kpis(subscription_period_start, subscription_period_end)
+
+        c1_label = "Total Users" if subscription_period_label == "All Time" else "New Users"
+        c1.metric(c1_label, f"{sub_user_kpis['total_users']:,}")
+
+        c2.metric(
+            f"Premium Conversion{subscription_period_suffix}",
+            f"{sub_user_kpis['premium_conversion_rate']}%",
+            help="Percentage of the selected user cohort who have EVER converted to a premium plan (Silver/Gold/Platinum/Diamond), at any point — not just within this window." if subscription_period_label != "All Time" else "Percentage of total users who have converted to a premium plan."
+        )
+        c3.metric(
+            f"Renewal Rate{subscription_period_suffix}",
+            f"{sub_renewal_kpis['renewal_rate']}%",
+            help="Percentage of subscribers who returned for another billing cycle." + ("" if subscription_period_label == "All Time" else f" Scoped to invoices within {subscription_period_label}.")
+        )
+
+        renewed_split = get_renewed_users_by_cycle(subscription_period_start, subscription_period_end)
 
         with c4:
             st.markdown(f"""
                 <div data-testid="stMetric" style="padding:16px 18px 14px 18px;">
                     <div style="color:#6B7280; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase;">
-                        Renewed Users
+                        Renewed Users{subscription_period_suffix}
                     </div>
                     <div style="color:#0F172A; font-weight:800; font-size:26px; letter-spacing:-0.5px; margin-top:4px;">
-                        {renewal['renewed_users']:,}
+                        {sub_renewal_kpis['renewed_users']:,}
                     </div>
                     <div style="display:flex; gap:14px; margin-top:10px; padding-top:10px; border-top:1px solid #F1F5F9;">
                         <div style="flex:1;">
@@ -1436,7 +1585,7 @@ if subscription_tab:
 
         # ---- Tier Explorer ----
         anchor("subscription-tier-explorer")
-        st.markdown("<div class='section-header'>Membership &amp; Subscription Tier Explorer</div>",
+        st.markdown(f"<div class='section-header'>Membership &amp; Subscription Tier Explorer{subscription_period_suffix}</div>",
                     unsafe_allow_html=True)
         st.markdown(
             "<p style='color: #6B7280; font-size: 14px; margin-top: -10px; margin-bottom: 20px;'>Active subscriber allocations, price points, and estimated billing cycle yields calculated directly from live database invoices.</p>",
@@ -1444,18 +1593,21 @@ if subscription_tab:
 
         df_inv = dd._df("invoices")
 
-        tiers_data = {
-            "Silver Plan": {"m_users": 0, "y_users": 0},
-            "Gold Plan": {"m_users": 0, "y_users": 0},
-            "Platinum Plan": {"m_users": 0, "y_users": 0},
-            "Diamond Plan": {"m_users": 0, "y_users": 0}
-        }
+        premium_plans_list = ["Silver Plan", "Gold Plan", "Platinum Plan", "Diamond Plan"]
+        tier_explorer_plans = premium_plans_list + ["Trial Plan"]
+
+        tiers_data = {p: {"m_users": 0, "y_users": 0} for p in tier_explorer_plans}
 
         if not df_inv.empty:
-            df_inv = df_inv[df_inv["billed_plan_name"].isin(tiers_data.keys())].copy()
+            df_inv = df_inv[df_inv["billed_plan_name"].isin(tier_explorer_plans)].copy()
 
             df_inv["billing_period_start_date"] = pd.to_datetime(df_inv["billing_period_start_date"])
             df_inv["billing_period_end_date"] = pd.to_datetime(df_inv["billing_period_end_date"])
+
+            if subscription_period_start is not None:
+                df_inv = df_inv[df_inv["billing_period_start_date"].dt.date >= subscription_period_start]
+            if subscription_period_end is not None:
+                df_inv = df_inv[df_inv["billing_period_start_date"].dt.date <= subscription_period_end]
 
             df_inv["cycle"] = np.where(
                 (df_inv["billing_period_end_date"] - df_inv["billing_period_start_date"]).dt.days >= 300,
@@ -1479,7 +1631,7 @@ if subscription_tab:
                 else:
                     tiers_data[plan]["y_users"] = int(row["unique_subs"])
 
-            card_cols = st.columns(4, gap="medium")
+            card_cols = st.columns(5, gap="medium")
 
             for idx, (tier_name, metrics) in enumerate(tiers_data.items()):
                 with card_cols[idx]:
@@ -1498,7 +1650,7 @@ if subscription_tab:
                 else:
                     rev_map[plan]["y_rev"] = int(row["amount_paid"])
 
-            card_cols = st.columns(4, gap="medium")
+            card_cols = st.columns(5, gap="medium")
 
             for idx, (tier_name, metrics) in enumerate(tiers_data.items()):
                 with card_cols[idx]:
@@ -1560,20 +1712,24 @@ if subscription_tab:
             
             """, unsafe_allow_html=True)
 
-            df_memb = get_membership_distribution()
+            membership_rows = []
+            for plan, metrics in tiers_data.items():
+                users = metrics["m_users"] + metrics["y_users"]
+                revenue = rev_map.get(plan, {}).get("m_rev", 0) + rev_map.get(plan, {}).get("y_rev", 0)
+                membership_rows.append({
+                    "plan_name": plan,
+                    "users": users,
+                    "monthly_subs": metrics["m_users"],
+                    "annual_subs": metrics["y_users"],
+                    "plan_revenue": revenue,
+                })
+            df_memb = pd.DataFrame(membership_rows)
+            df_memb = df_memb[df_memb["users"] > 0]
 
             if not df_memb.empty:
                 total_users = df_memb["users"].sum()
                 df_memb["pct"] = (df_memb["users"] / total_users * 100).round(1)
                 df_memb = df_memb.sort_values("users", ascending=True).reset_index(drop=True)
-
-                # Extra hover fields
-                df_memb["monthly_subs"] = df_memb["plan_name"].map(
-                    lambda p: tiers_data.get(p, {}).get("m_users", 0))
-                df_memb["annual_subs"] = df_memb["plan_name"].map(
-                    lambda p: tiers_data.get(p, {}).get("y_users", 0))
-                df_memb["plan_revenue"] = df_memb["plan_name"].map(
-                    lambda p: rev_map.get(p, {}).get("m_rev", 0) + rev_map.get(p, {}).get("y_rev", 0))
 
                 colors = ["#2563EB" for _ in df_memb["plan_name"]]
 
@@ -1630,11 +1786,36 @@ if subscription_tab:
             
             """, unsafe_allow_html=True)
 
-            df_p = get_premium_users_by_sso().sort_values("premium_users", ascending=True)
+            df_inv_premium_only = df_inv[df_inv["billed_plan_name"].isin(premium_plans_list)]
+            df_users_for_partner = dd._df("users")
+            merged_premium = df_inv_premium_only.merge(
+                df_users_for_partner[["user_id", "sso_partner_name"]], on="user_id", how="left"
+            )
+            merged_premium["sso_partner_name"] = merged_premium["sso_partner_name"].astype(str).str.strip()
+            partner_canonical = {
+                "thefinpedia": "Thefinpedia",
+                "ifanow": "IFANOW",
+                "compoundexpress": "CompoundExpress",
+                "investwell": "Investwell",
+            }
+            merged_premium["_norm"] = merged_premium["sso_partner_name"].str.lower()
+            merged_premium = merged_premium[merged_premium["_norm"].isin(partner_canonical.keys())]
+            merged_premium["sso_partner_name"] = merged_premium["_norm"].map(partner_canonical)
 
-            # Merge partner revenue and plan count from existing partner plan data
-            if not df_partner_plan.empty:
-                partner_extra = df_partner_plan.groupby("sso_partner_name").agg(
+            df_p = (
+                merged_premium.groupby("sso_partner_name")["user_id"]
+                .nunique()
+                .reset_index(name="premium_users")
+            )
+            df_p = df_p[df_p["premium_users"] > 0].sort_values("premium_users", ascending=True)
+
+            # Own local partner-revenue pull, scoped to THIS tab's period filter —
+            # not the Revenue tab's df_partner_plan, which uses a different period.
+            df_partner_plan_local = dd.get_partner_revenue_by_plan(subscription_period_start, subscription_period_end)
+
+            # Merge partner revenue and plan count from this tab's own partner plan data
+            if not df_partner_plan_local.empty:
+                partner_extra = df_partner_plan_local.groupby("sso_partner_name").agg(
                     total_revenue=("revenue", "sum"),
                     plan_count=("plan_name", "nunique")
                 ).reset_index()
@@ -1939,14 +2120,14 @@ if subscription_tab:
 
         # ---- Conversion Funnel ----
         anchor("subscription-conversion-funnel")
-        st.markdown("""
+        st.markdown(f"""
         <div class="chart-card">
-            <div class="figure-title">Conversion Funnel Stages</div>
+            <div class="figure-title">Conversion Funnel Stages{subscription_period_suffix}</div>
         
         """, unsafe_allow_html=True)
 
 
-        funnel = get_conversion_funnel()
+        funnel = get_conversion_funnel(subscription_period_start, subscription_period_end)
 
         funnel = funnel.sort_values("users", ascending=False).reset_index(drop=True)
 
@@ -2052,13 +2233,13 @@ if subscription_tab:
 
         with left:
             anchor("subscription-renewal-cohort-trend")
-            st.markdown("""
+            st.markdown(f"""
             <div class="chart-card">
-                <div class="figure-title">Renewal Cohort Trend</div>
+                <div class="figure-title">Renewal Cohort Trend{subscription_period_suffix}</div>
             
             """, unsafe_allow_html=True)
 
-            df_renewal_trend = dd.get_renewal_cohort_trend()
+            df_renewal_trend = dd.get_renewal_cohort_trend(subscription_period_start, subscription_period_end)
 
             if not df_renewal_trend.empty:
                 df_renewal_trend = df_renewal_trend.sort_values("month").reset_index(drop=True)
@@ -2156,30 +2337,23 @@ if subscription_tab:
 
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-                best = df_renewal_trend.loc[df_renewal_trend["renewed_subscribers"].idxmax()]
-                worst = df_renewal_trend.loc[df_renewal_trend["renewed_subscribers"].iloc[1:].idxmin()]
-
             st.markdown("</div>", unsafe_allow_html=True)
 
         with right:
             anchor("subscription-renewal-rate-by-plan")
-            st.markdown("""
+            st.markdown(f"""
             <div class="chart-card">
-                <div class="figure-title">Renewal Rate by Plan</div>
+                <div class="figure-title">Renewal Rate by Plan{subscription_period_suffix}</div>
             
             """, unsafe_allow_html=True)
-            df_plan_trend = dd.get_renewal_by_plan()
-
-            df_plan_trend = df_plan_trend.rename(columns={
-                "eligible_user": "eligible_users",
-                "not_renewed_users": "not_renewed"
-            })
+            df_plan_trend = dd.get_renewal_by_plan_period(subscription_period_start, subscription_period_end)
 
             color_map_plan = {
                 "Silver Plan": "#9CA3AF", "Silver Tier": "#9CA3AF",
                 "Gold Plan": "#F59E0B", "Gold Ultimate": "#F59E0B",
                 "Platinum Plan": "#2563EB", "Platinum Executive": "#2563EB",
                 "Diamond Plan": "#6366F1", "Diamond Elite": "#6366F1",
+                "Trial Plan": "#D1D5DB",
             }
 
             if "month" in df_plan_trend.columns:
@@ -2218,95 +2392,99 @@ if subscription_tab:
                 st.plotly_chart(fig_plan, use_container_width=True, config={"displayModeBar": False})
 
             else:
-                df_plan_trend = df_plan_trend.sort_values("renewal_rate", ascending=True)
-                fig_plan = px.bar(df_plan_trend, x="renewal_rate", y="plan_name", orientation="h")
+                df_plan_trend = df_plan_trend[df_plan_trend["renewed_users"] > 0].sort_values("renewal_rate", ascending=True)
 
-                bar_colors = [color_map_plan.get(p, BLUE) for p in df_plan_trend["plan_name"]]
+                if df_plan_trend.empty:
+                    st.info("No renewals in this period.")
+                else:
+                    fig_plan = px.bar(df_plan_trend, x="renewal_rate", y="plan_name", orientation="h")
 
-                fig_plan.update_traces(
-                    marker_color=bar_colors,
-                    marker_line_width=0,
-                    marker_cornerradius=4,
+                    bar_colors = [color_map_plan.get(p, BLUE) for p in df_plan_trend["plan_name"]]
 
-                    customdata=df_plan_trend[
-                        [
-                            "premium_users",
-                            "eligible_users",
-                            "renewed_users",
-                            "not_renewed",
-                            "renewal_rate",
-                        ]
-                    ],
+                    fig_plan.update_traces(
+                        marker_color=bar_colors,
+                        marker_line_width=0,
+                        marker_cornerradius=4,
 
-                    text=df_plan_trend["renewal_rate"].apply(lambda x: f"{x:.1f}%"),
-                    textposition="outside",
-                    textfont=dict(
-                        size=11,
-                        color="#374151",
-                        family="Manrope",
-                    ),
+                        customdata=df_plan_trend[
+                            [
+                                "total_renewed_all_plans",
+                                "renewed_users",
+                                "monthly_renewed",
+                                "annual_renewed",
+                                "renewal_rate",
+                            ]
+                        ],
 
-                    cliponaxis=False,
+                        text=df_plan_trend["renewal_rate"].apply(lambda x: f"{x:.1f}%"),
+                        textposition="outside",
+                        textfont=dict(
+                            size=11,
+                            color="#374151",
+                            family="Manrope",
+                        ),
 
-                    hovertemplate="""
+                        cliponaxis=False,
+
+                        hovertemplate="""
                 <b>%{y}</b>
 
                 <br><br>
             
-                Premium Users
+                Total Renewals (window)
                 <b>%{customdata[0]:,}</b>
                 <br>
-                Eligible Users
+                Renewed Users (this plan)
                 <b>%{customdata[1]:,}</b>
 
                 <br>
 
-                Renewed Users
+                Monthly
                 <b>%{customdata[2]:,}</b>
 
                 <br>
 
-                Not Renewed
+                Annual
                 <b>%{customdata[3]:,}</b>
 
                 <br><br>
 
-                Renewal Rate
+                Share of Total Renewals
                 <b>%{customdata[4]:.1f}%</b>
 
                 <extra></extra>
                 """
-                )
+                    )
 
-                fig_plan.update_layout(
-                    height=310,
-                    bargap=0.4,
-                    **CHART_BG,
-                    font=FONT,
-                    margin=dict(l=12, r=70, t=10, b=40),
-                    showlegend=False,
-                    hoverlabel=HOVER_LABEL,
-                    hovermode="y",
-                    xaxis_title="Renewal Rate (%)",
-                    yaxis_title=""
-                )
+                    fig_plan.update_layout(
+                        height=310,
+                        bargap=0.4,
+                        **CHART_BG,
+                        font=FONT,
+                        margin=dict(l=12, r=70, t=10, b=40),
+                        showlegend=False,
+                        hoverlabel=HOVER_LABEL,
+                        hovermode="y",
+                        xaxis_title="Renewal Rate (%)",
+                        yaxis_title=""
+                    )
 
-                fig_plan.update_xaxes(showgrid=False, zeroline=False, showticklabels=False, title_font=AXIS_FONT)
-                fig_plan.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+                    fig_plan.update_xaxes(showgrid=False, zeroline=False, showticklabels=False, title_font=AXIS_FONT)
+                    fig_plan.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
 
-                st.plotly_chart(fig_plan, use_container_width=True, config={"displayModeBar": False})
+                    st.plotly_chart(fig_plan, use_container_width=True, config={"displayModeBar": False})
 
             st.markdown("</div>", unsafe_allow_html=True)
 
         # ---- Renewal Rate by Partner ----
         anchor("subscription-renewal-rate-by-partner")
-        st.markdown("""
+        st.markdown(f"""
         <div class="chart-card">
-            <div class="figure-title">Renewal Rate by Partner (Trend)</div>
+            <div class="figure-title">Renewal Rate by Partner (Trend){subscription_period_suffix}</div>
         
         """, unsafe_allow_html=True)
 
-        df_partner_trend = dd.get_renewal_by_partner()
+        df_partner_trend = dd.get_renewal_by_partner_period(subscription_period_start, subscription_period_end)
 
         if "month" in df_partner_trend.columns:
             fig_partner = go.Figure()
@@ -2349,83 +2527,87 @@ if subscription_tab:
             fig_partner.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
             st.plotly_chart(fig_partner, use_container_width=True, config={"displayModeBar": False})
         else:
-            df_partner_trend = df_partner_trend.sort_values("renewal_rate", ascending=True)
-            fig_partner = px.bar(df_partner_trend, x="renewal_rate", y="sso_partner_name", orientation="h")
+            df_partner_trend = df_partner_trend[df_partner_trend["renewed_users"] > 0].sort_values("renewal_rate", ascending=True)
 
-            fig_partner.update_traces(
-                marker_color=BLUE,
-                marker_line_width=0,
-                marker_cornerradius=4,
+            if df_partner_trend.empty:
+                st.info("No renewals in this period.")
+            else:
+                fig_partner = px.bar(df_partner_trend, x="renewal_rate", y="sso_partner_name", orientation="h")
 
-                customdata=df_partner_trend[
-                    [
-                        "premium_users",
-                        "eligible_users",
-                        "renewed_users",
-                        "not_renewed",
-                        "renewal_rate",
-                    ]
-                ],
+                fig_partner.update_traces(
+                    marker_color=BLUE,
+                    marker_line_width=0,
+                    marker_cornerradius=4,
 
-                text=df_partner_trend["renewal_rate"].apply(lambda x: f"{x:.1f}%"),
-                textposition="outside",
-                textfont=dict(
-                    size=11,
-                    color="#374151",
-                    family="Manrope",
-                ),
+                    customdata=df_partner_trend[
+                        [
+                            "total_renewed_all_partners",
+                            "renewed_users",
+                            "monthly_renewed",
+                            "annual_renewed",
+                            "renewal_rate",
+                        ]
+                    ],
 
-                cliponaxis=False,
+                    text=df_partner_trend["renewal_rate"].apply(lambda x: f"{x:.1f}%"),
+                    textposition="outside",
+                    textfont=dict(
+                        size=11,
+                        color="#374151",
+                        family="Manrope",
+                    ),
 
-                hovertemplate="""
+                    cliponaxis=False,
+
+                    hovertemplate="""
             <b>%{y}</b>
 
             <br><br>
 
-            Premium Users
+            Total Renewals (window)
             <b>%{customdata[0]:,}</b>
 
             <br>
 
-            Eligible Users
+            Renewed Users (this partner)
             <b>%{customdata[1]:,}</b>
 
             <br>
 
-            Renewed Users
+            Monthly
             <b>%{customdata[2]:,}</b>
 
             <br>
 
-            Not Renewed
+            Annual
             <b>%{customdata[3]:,}</b>
 
             <br><br>
 
-            Renewal Rate
+            Share of Total Renewals
             <b>%{customdata[4]:.1f}%</b>
 
             <extra></extra>
             """
-            )
+                )
 
-            fig_partner.update_layout(
-                height=320,
-                bargap=0.4,
-                **CHART_BG,
-                font=FONT,
-                margin=dict(l=12, r=70, t=10, b=40),
-                showlegend=False,
-                hoverlabel=HOVER_LABEL,
-                hovermode="y",
-                xaxis_title="Renewal Rate (%)",
-                yaxis_title=""
-            )
+                fig_partner.update_layout(
+                    height=320,
+                    bargap=0.4,
+                    **CHART_BG,
+                    font=FONT,
+                    margin=dict(l=12, r=70, t=10, b=40),
+                    showlegend=False,
+                    hoverlabel=HOVER_LABEL,
+                    hovermode="y",
+                    xaxis_title="Renewal Rate (%)",
+                    yaxis_title=""
+                )
 
-            fig_partner.update_xaxes(showgrid=False, zeroline=False, showticklabels=False, title_font=AXIS_FONT)
-            fig_partner.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+                fig_partner.update_xaxes(showgrid=False, zeroline=False, showticklabels=False, title_font=AXIS_FONT)
+                fig_partner.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
 
-            st.plotly_chart(fig_partner, use_container_width=True, config={"displayModeBar": False})
+                st.plotly_chart(fig_partner, use_container_width=True, config={"displayModeBar": False})
 
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
@@ -2479,6 +2661,103 @@ if subscription_tab:
         {', '.join(map(str, renewals['next_15_days_users'])) or 'None'}
         """
         )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ---- Non-Renewal Insights ----
+        anchor("subscription-non-renewal-insights")
+        st.markdown("""
+        <div class="chart-card">
+            <div class="figure-title">Non-Renewal Insights</div>
+            <div class="figure-caption">Users whose latest invoice (Silver/Gold/Platinum/Diamond/Trial) has already expired with no newer invoice since.</div>
+        """, unsafe_allow_html=True)
+
+        df_renewal_status = get_renewal_status_by_plan()
+        if df_renewal_status is not None and not df_renewal_status.empty:
+            total_active_nr = int(df_renewal_status[df_renewal_status["renewal_status"] == "Active"]["user_count"].sum())
+            total_non_renewal = int(df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"]["user_count"].sum())
+            total_nr_base = total_active_nr + total_non_renewal
+            non_renewal_rate = round(total_non_renewal / total_nr_base * 100, 1) if total_nr_base else 0.0
+
+            nr1, nr2, nr3 = st.columns(3)
+            nr1.metric("Active Subscribers", f"{total_active_nr:,}")
+            nr2.metric("Non-Renewal Users", f"{total_non_renewal:,}")
+            nr3.metric("Non-Renewal Rate", f"{non_renewal_rate}%")
+
+            # Stacked bar: Active vs Non-Renewal per plan
+            plan_order = (
+                df_renewal_status.groupby("billed_plan_name")["user_count"].sum()
+                .sort_values(ascending=True).index.tolist()
+            )
+            active_by_plan = df_renewal_status[df_renewal_status["renewal_status"] == "Active"].set_index("billed_plan_name").reindex(plan_order).fillna(0)
+            nonrenewal_by_plan = df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"].set_index("billed_plan_name").reindex(plan_order).fillna(0)
+
+            plan_hover_active, plan_hover_nonrenewal = [], []
+            for plan in plan_order:
+                a = int(active_by_plan.loc[plan, "user_count"])
+                nr = int(nonrenewal_by_plan.loc[plan, "user_count"])
+                plan_total = a + nr
+                rate = round(nr / plan_total * 100, 1) if plan_total else 0.0
+                plan_hover_active.append(f"<b>{plan}</b> — Active<br>Active: {a:,}<br>Non-Renewal: {nr:,}<br>Non-Renewal Rate: {rate}%")
+                plan_hover_nonrenewal.append(f"<b>{plan}</b> — Non-Renewal<br>Active: {a:,}<br>Non-Renewal: {nr:,}<br>Non-Renewal Rate: {rate}%")
+
+            fig_nr_plan = go.Figure()
+            fig_nr_plan.add_trace(go.Bar(
+                y=plan_order, x=active_by_plan["user_count"], name="Active", orientation="h",
+                marker_color="#10B981", marker_line_width=0,
+                hovertext=plan_hover_active, hoverinfo="text",
+            ))
+            fig_nr_plan.add_trace(go.Bar(
+                y=plan_order, x=nonrenewal_by_plan["user_count"], name="Non-Renewal", orientation="h",
+                marker_color="#EF4444", marker_line_width=0,
+                hovertext=plan_hover_nonrenewal, hoverinfo="text",
+            ))
+            fig_nr_plan.update_layout(
+                barmode="stack", height=280, **CHART_BG, font=FONT,
+                margin=dict(l=12, r=30, t=10, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                            font=dict(size=11, color="#0F172A")),
+                hoverlabel=HOVER_LABEL,
+                xaxis_title="Users", yaxis_title="",
+            )
+            fig_nr_plan.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+            fig_nr_plan.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+            st.plotly_chart(fig_nr_plan, use_container_width=True, config={"displayModeBar": False})
+
+            # Monthly trend of non-renewals
+            df_nr_trend = get_non_renewal_trend()
+            if df_nr_trend is not None and not df_nr_trend.empty:
+                df_nr_trend = df_nr_trend.copy()
+                df_nr_trend["month"] = pd.to_datetime(df_nr_trend["month"])
+                fig_nr_trend = go.Figure(go.Scatter(
+                    x=df_nr_trend["month"], y=df_nr_trend["non_renewal_count"], mode="lines+markers",
+                    line=dict(color="#EF4444", width=2.5, shape="spline"),
+                    hovertemplate="<b>%{x|%b %Y}</b><br>Non-Renewals: <b>%{y}</b><extra></extra>",
+                ))
+                fig_nr_trend.update_layout(
+                    height=240, **CHART_BG, font=FONT, margin=dict(l=40, r=20, t=10, b=40),
+                    showlegend=False, hoverlabel=HOVER_LABEL,
+                    xaxis_title="Month", yaxis_title="Non-Renewal Users",
+                )
+                fig_nr_trend.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+                fig_nr_trend.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+                st.plotly_chart(fig_nr_trend, use_container_width=True, config={"displayModeBar": False})
+
+            top_plan_row = df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"].sort_values("user_count", ascending=False)
+            if not top_plan_row.empty:
+                top_plan_name = top_plan_row.iloc[0]["billed_plan_name"]
+                top_plan_count = int(top_plan_row.iloc[0]["user_count"])
+                st.markdown(
+                    insight_box(
+                        f"<b>{top_plan_name}</b> has the most non-renewal users (<b>{top_plan_count:,}</b>), out of "
+                        f"<b>{total_non_renewal:,}</b> total non-renewals (<b>{non_renewal_rate}%</b> of all users on these plans).",
+                        title="Non-Renewal Insight",
+                    ),
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("No non-renewal data available.")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 df_partner = get_revenue_by_sso()
 

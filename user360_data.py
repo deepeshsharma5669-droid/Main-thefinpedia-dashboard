@@ -39,12 +39,14 @@ def _many(view_name, user_id, order_col=None, desc=True, limit=None):
 # Search / Profile
 # ------------------------------------------------------------
 def get_user_search_list():
-    """Paginated fetch — this list can exceed Supabase's default 1000-row response cap."""
+    """Paginated fetch — this list can exceed Supabase's default 1000-row response cap.
+    Only pulls the 3 columns actually used by the search/ranking logic, to keep the
+    payload (and therefore the fetch time) as small as possible."""
     all_rows, start, page_size = [], 0, 1000
     while True:
         result = (
             supabase.table("user360_search_list")
-            .select("*")
+            .select("user_id, mobile_number, search_label")
             .range(start, start + page_size - 1)
             .execute()
         )

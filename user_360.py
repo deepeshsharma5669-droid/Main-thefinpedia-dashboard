@@ -3,7 +3,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import html
-from streamlit_searchbox import st_searchbox
 
 import user360_data as u360
 
@@ -124,10 +123,18 @@ def _status_badge_html(status):
     )
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner="Loading users…")
 def _cached_search_list():
-    """Cached for 5 minutes so every keystroke doesn't re-fetch all ~7,057 users."""
-    return u360.get_user_search_list()
+    """Cached for 30 minutes so every keystroke doesn't re-fetch/re-process all ~7,057
+    users. Also precomputes the lowercase columns once here, instead of redoing that
+    string work on every single search call."""
+    df = u360.get_user_search_list()
+    if df is None or df.empty:
+        return df
+    df["_id_str"] = df["user_id"].astype(str)
+    df["_mobile_str"] = df["mobile_number"].fillna("").astype(str).str.lower()
+    df["_label_str"] = df["search_label"].astype(str).str.lower()
+    return df
 
 
 def _search_users(searchterm):
@@ -141,8 +148,8 @@ def _search_users(searchterm):
         return []
 
     q = searchterm.strip().lower()
-    ids_as_str = search_df["user_id"].astype(str)
-    mobiles_as_str = search_df["mobile_number"].fillna("").astype(str).str.lower()
+    ids_as_str = search_df["_id_str"]
+    mobiles_as_str = search_df["_mobile_str"]
 
     exact_id = search_df[ids_as_str == q]
     matched_ids = set(exact_id["user_id"])
@@ -160,10 +167,10 @@ def _search_users(searchterm):
     matched_ids |= set(mobile_contains["user_id"])
 
     label_match = search_df[
-        search_df["search_label"].str.lower().str.contains(q, regex=False) & (~search_df["user_id"].isin(matched_ids))
+        search_df["_label_str"].str.contains(q, regex=False) & (~search_df["user_id"].isin(matched_ids))
     ]
 
-    ranked = pd.concat([exact_id, exact_mobile, startswith_id, mobile_contains, label_match]).head(25)
+    ranked = pd.concat([exact_id, exact_mobile, startswith_id, mobile_contains, label_match]).head(20)
     return [(row["search_label"], row["user_id"]) for _, row in ranked.iterrows()]
 
 
@@ -173,13 +180,36 @@ def show_user_360():
 
     # --------------------------------------------------------
     # SEARCH SELECTOR
+    # st_searchbox reran the *entire* app on every debounced keystroke,
+    # which is expensive on a file this size and felt like it was
+    # "searching twice". A single-submit form only reruns once per
+    # actual search, then a lightweight selectbox picks the exact user.
     # --------------------------------------------------------
-    user_id = st_searchbox(
-        _search_users,
-        placeholder="Search by user ID, name, company, email, or mobile number",
-        label="Search user",
-        key="user360_searchbox",
-    )
+    with st.form("user360_search_form", clear_on_submit=False):
+        search_col, btn_col = st.columns([5, 1])
+        query = search_col.text_input(
+            "Search user",
+            placeholder="Search by user ID, name, company, email, or mobile number",
+            label_visibility="collapsed",
+            key="user360_search_query",
+        )
+        submitted = btn_col.form_submit_button("Search", use_container_width=True)
+
+    if submitted:
+        st.session_state["user360_search_results"] = _search_users(query)
+        st.session_state["user360_selected_user"] = None
+
+    results = st.session_state.get("user360_search_results", [])
+
+    if results:
+        options = ["— Select a user —"] + [label for label, _ in results]
+        choice = st.selectbox("Matching users", options, key="user360_result_picker", label_visibility="collapsed")
+        if choice != "— Select a user —":
+            st.session_state["user360_selected_user"] = next((uid for label, uid in results if label == choice), None)
+    elif submitted:
+        st.warning("No matching users found.")
+
+    user_id = st.session_state.get("user360_selected_user")
 
     if not user_id:
         st.info("Search for a user above to view their full profile, revenue, activity, campaigns, and support history.")
