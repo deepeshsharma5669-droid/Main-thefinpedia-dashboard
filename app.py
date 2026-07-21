@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from product_usage import show_product_usage
 from user_360 import show_user_360
 from content_usage import show_content_usage
-from admin_panel import render_admin_panel
+from chat_widget import show_chat
 import dashboard_data as dd
 from dashboard_data import *
 import pandas as pd
@@ -31,101 +31,6 @@ st.set_page_config(
     page_icon=icon,
     layout="wide"
 )
-
-# ============================================================
-# 🔐 AUTH GATE
-# ============================================================
-# ============================================================
-# 🔐 AUTH GATE
-# ============================================================
-# ============================================================
-# 🔐 AUTH GATE
-# ============================================================
-if not st.user.is_logged_in:
-    st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
-    html, body, [class*="css"] { font-family: 'Manrope', sans-serif; }
-    .stApp { background: #F7F8FA; }
-
-    .login-card {
-        background: white;
-        border: 1px solid #EAECF0;
-        border-radius: 16px;
-        box-shadow: 0 4px 24px rgba(16,24,40,0.08);
-        padding: 40px 40px 8px 40px;
-        text-align: center;
-        margin-top: 12vh;
-    }
-    .login-badge {
-        width: 52px; height: 52px;
-        border-radius: 14px;
-        background: linear-gradient(135deg, #2563EB, #1D4ED8);
-        display: flex; align-items: center; justify-content: center;
-        margin: 0 auto 18px auto;
-        font-size: 20px; font-weight: 800; color: white;
-    }
-    .login-title {
-        font-size: 19px; font-weight: 800; color: #0F172A;
-        letter-spacing: -0.3px; margin-bottom: 6px;
-    }
-    .login-subtitle {
-        font-size: 13px; color: #64748B; font-weight: 500;
-        margin-bottom: 24px; line-height: 1.5;
-    }
-    div[data-testid="stButton"] > button {
-        width: 100%;
-        background: white;
-        color: #1F2937;
-        border: 1px solid #D1D9E0;
-        border-radius: 10px;
-        padding: 10px 16px;
-        font-weight: 700;
-        font-size: 14px;
-        box-shadow: 0 1px 2px rgba(16,24,40,0.04);
-        transition: box-shadow 0.15s ease, border-color 0.15s ease;
-    }
-    div[data-testid="stButton"] > button:hover {
-        border-color: #2563EB;
-        color: #2563EB;
-        box-shadow: 0 2px 8px rgba(37,99,235,0.12);
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    _, center_col, _ = st.columns([1, 1.1, 1])
-    with center_col:
-        st.markdown("""
-        <div class="login-card">
-            <div class="login-badge">FP</div>
-            <div class="login-title">TheFinPedia Executive Dashboard</div>
-            <div class="login-subtitle">Sign in with your work Google account to continue</div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("🔐  Continue with Google"):
-            st.login()
-
-    st.stop()
-
-user_email = st.user.email
-
-@st.cache_data(ttl=300)
-def _get_user_role(email):
-    return dd.get_role_for_email(email)
-
-@st.cache_data(ttl=300)
-def _get_allowed_sections(role):
-    return dd.get_permissions_for_role(role)
-
-user_role = _get_user_role(user_email)
-
-if not user_role:
-    st.error(f"Access denied. {user_email} is not registered. Contact your admin.")
-    if st.button("Log out"):
-        st.logout()
-    st.stop()
-
-allowed_sections = _get_allowed_sections(user_role)
 
 # ============================================================
 # 🎨 STEP 1: UPGRADED CSS STYLE ENGINE
@@ -882,12 +787,14 @@ conversion_rate = round((kpis["premium_users"] / kpis["total_users"]) * 100, 2)
 premium_share = round((kpis["premium_users"] / kpis["paying_users"]) * 100, 1)
 non_premium_revenue_users = kpis["paying_users"] - kpis["premium_users"]
 
+
 # ============================================================
 # 🖥️ MAIN DASHBOARD
 # ============================================================
 @st.cache_data(ttl=3600)
 def _get_last_db_update():
     return dd.get_last_database_update()
+
 
 _last_update_raw = _get_last_db_update()
 _last_update_display = "Unavailable"
@@ -924,30 +831,27 @@ title_col, pill_col, icon_col, _spacer_col, settings_col = st.columns(
     [2.6, 1.3, 0.3, 5.0, 0.9], gap="small", vertical_alignment="center"
 )
 with title_col:
-    st.markdown('<div class="dash-title" style="margin-bottom:0;">TheFinPedia Executive Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dash-title" style="margin-bottom:0;">TheFinPedia Executive Dashboard</div>',
+                unsafe_allow_html=True)
 with pill_col:
-    st.markdown(f'<span class="db-updated-pill">Database updated on: {_last_update_display}</span>', unsafe_allow_html=True)
+    st.markdown(f'<span class="db-updated-pill">Database updated on: {_last_update_display}</span>',
+                unsafe_allow_html=True)
 with icon_col:
     with st.container(key="refresh_btn_wrap"):
         if st.button("🔄", key="refresh_dashboard", help="Reload data from the database without losing your place"):
             st.cache_data.clear()
             st.rerun()
 
-st.markdown('<div class="dash-subtitle" style="margin-top:2px;">Revenue, subscriptions and growth performance across plans and partners</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="dash-subtitle" style="margin-top:2px;">Revenue, subscriptions and growth performance across plans and partners</div>',
+    unsafe_allow_html=True)
 
-if user_role == "Admin":
-    with settings_col:
-        if st.button("⚙️ Settings", key="open_admin_settings"):
-            st.session_state["show_admin_panel"] = not st.session_state.get("show_admin_panel", False)
 
-if user_role == "Admin" and st.session_state.get("show_admin_panel", False):
-    with st.container(border=True):
-        render_admin_panel()
-    st.markdown("<br>", unsafe_allow_html=True)
+ALL_TABS = ["Revenue", "Subscriptions", "Engineering", "Product Usage", "Content Analytics", "Customer Support",
+            "User 360"]
 
-ALL_TABS = ["Revenue", "Subscriptions", "Engineering", "Product Usage", "Content Analytics", "Customer Support", "User 360"]
-allowed_sections_normalized = {s.strip().lower().replace(" ", "_") for s in allowed_sections}
-visible_tabs = [t for t in ALL_TABS if t.lower().replace(" ", "_") in allowed_sections_normalized]
+# No auth/role system in this build — every tab is visible to everyone.
+visible_tabs = ALL_TABS
 
 tab_objects = st.tabs(visible_tabs)
 tab_map = dict(zip(visible_tabs, tab_objects))
@@ -965,9 +869,12 @@ user_360_tab = tab_map.get("User 360")
 # ═══════════════════════════════════════════════════════
 if revenue_tab:
     with revenue_tab:
-        # ---- Sidebar nav rail ----
+        # ---- Sidebar: nav rail + persistent chatbot ----
         with st.sidebar:
             render_nav_rail()
+            st.markdown("---")
+            show_chat()
+
 
         def _resolve_revenue_period(period_label):
             """Converts a period label into (start_date, end_date) as date objects.
@@ -986,6 +893,7 @@ if revenue_tab:
             else:  # "All Time"
                 start, end = None, None
             return start, end
+
 
         anchor("revenue-overview")
         header_left, header_right = st.columns([3, 1])
@@ -1008,12 +916,14 @@ if revenue_tab:
         c1.metric(
             f"Total Revenue{revenue_kpi_suffix}",
             f"₹ {revenue_kpis['total_revenue']:,.0f}",
-            help="Gross platform earnings accumulated across all paid subscriber categories, subscription renewals, plan upgrades, and individual top-ups." + ("" if revenue_period_label == "All Time" else f" Scoped to {revenue_period_label} (by billing_period_start_date).")
+            help="Gross platform earnings accumulated across all paid subscriber categories, subscription renewals, plan upgrades, and individual top-ups." + (
+                "" if revenue_period_label == "All Time" else f" Scoped to {revenue_period_label} (by billing_period_start_date).")
         )
         c2.metric(
             f"ARPU{revenue_kpi_suffix}",
             f"₹ {revenue_kpis['arpu']:,.0f}",
-            help="Average Revenue Per User: Calculated as Total Revenue divided by your total count of active paying or contract-holding accounts." + ("" if revenue_period_label == "All Time" else f" Scoped to {revenue_period_label} (by billing_period_start_date).")
+            help="Average Revenue Per User: Calculated as Total Revenue divided by your total count of active paying or contract-holding accounts." + (
+                "" if revenue_period_label == "All Time" else f" Scoped to {revenue_period_label} (by billing_period_start_date).")
         )
 
         subscriber_kpis = get_subscriber_kpis(revenue_period_start, revenue_period_end)
@@ -1024,7 +934,7 @@ if revenue_tab:
         else:
             subscriber_main_label = "New Subscribers"
             subscriber_main_value = subscriber_kpis["new_subscribers"]
-            subscriber_tooltip = f"Users whose first-ever Silver/Gold/Platinum/Diamond/Trial subscription started during {revenue_period_label}. Active reflects the current live snapshot, not scoped to this period."
+            subscriber_tooltip = f"Users whose first-ever Silver/Gold/Platinum/Diamond/Trial subscription started during {revenue_period_label}. Active reflects the current live snapshot, not scoped to this window."
 
         with c3:
             st.markdown(f"""
@@ -1080,7 +990,7 @@ if revenue_tab:
         st.markdown(f"""
         <div class="chart-card">
             <div class="figure-title">Daily Revenue Trend{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
-        
+
         """, unsafe_allow_html=True)
 
         df = get_revenue_trend_daily(revenue_period_start, revenue_period_end)
@@ -1259,12 +1169,6 @@ if revenue_tab:
                 var config = {{ displayModeBar: false, responsive: true }};
                 var gd = document.getElementById('{div_id}');
 
-                // Fix: Plotly caches legend text-fitting boxes on its first layout
-                // pass. A fixed setTimeout delay was a guess at when the iframe
-                // would be settled to its real width — unreliable across
-                // different zoom levels/environments. Instead, wait until the
-                // container's width is actually unchanged across two animation
-                // frames before ever calling Plotly.newPlot.
                 function waitForStableWidth(el, cb, tries) {{
                     tries = tries || 0;
                     var w1 = el.offsetWidth;
@@ -1307,7 +1211,7 @@ if revenue_tab:
             """
             st.components.v1.html(component_html, height=height + 20, scrolling=False)
 
-        
+
         # ---- Figure 2+3: Revenue by Plan & Partner ----
         c1, c2 = st.columns(2, gap="small")
 
@@ -1320,7 +1224,8 @@ if revenue_tab:
 
             df_plan_cycle = get_plan_revenue_by_cycle(revenue_period_start, revenue_period_end)
             if not df_plan_cycle.empty:
-                unwanted_plans = ["Custom SSO 5.0", "Silver Duplicate 1", "Diamond Plan Duplicate", "Gold Plan Duplicate"]
+                unwanted_plans = ["Custom SSO 5.0", "Silver Duplicate 1", "Diamond Plan Duplicate",
+                                  "Gold Plan Duplicate"]
                 df_plan_clean = df_plan_cycle[~df_plan_cycle["plan_name"].isin(unwanted_plans)].copy()
 
                 pivot_plan = (
@@ -1418,7 +1323,7 @@ if revenue_tab:
         st.markdown(f"""
         <div class="chart-card">
             <div class="figure-title">Monthly → Yearly Plan Conversions{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
-        
+
         """, unsafe_allow_html=True)
 
         df_conv = get_monthly_to_yearly_conversions(revenue_period_start, revenue_period_end)
@@ -1446,7 +1351,7 @@ if revenue_tab:
                     <div style="display:flex;flex-direction:column;gap:3px;padding:0 22px;border-left:1px solid #E5E7EB;flex:1;min-width:160px;">
                         <span style="font-size:10px;color:#9CA3AF;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;">{row['pattern']}</span>
                         <span style="font-size:19px;font-weight:800;color:#0F172A;letter-spacing:-0.5px;">{row['count']:,}</span>
-                    
+
                     </div>"""
 
                 st.components.v1.html(f"""
@@ -1464,7 +1369,8 @@ if revenue_tab:
 
             styled_df = df_conv.copy()
             if "conversion_date" in styled_df.columns:
-                styled_df["conversion_date"] = pd.to_datetime(styled_df["conversion_date"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+                styled_df["conversion_date"] = pd.to_datetime(styled_df["conversion_date"]).dt.strftime(
+                    "%Y-%m-%d %H:%M:%S")
 
             if "amount_paid" in styled_df.columns:
                 styled_df["amount_paid"] = styled_df["amount_paid"].astype(int)
@@ -1523,6 +1429,7 @@ if subscription_tab:
                 start, end = None, None
             return start, end
 
+
         anchor("subscription-overview")
         sub_header_left, sub_header_right = st.columns([3, 1])
         with sub_header_left:
@@ -1553,7 +1460,8 @@ if subscription_tab:
         c3.metric(
             f"Renewal Rate{subscription_period_suffix}",
             f"{sub_renewal_kpis['renewal_rate']}%",
-            help="Percentage of subscribers who returned for another billing cycle." + ("" if subscription_period_label == "All Time" else f" Scoped to invoices within {subscription_period_label}.")
+            help="Percentage of subscribers who returned for another billing cycle." + (
+                "" if subscription_period_label == "All Time" else f" Scoped to invoices within {subscription_period_label}.")
         )
 
         renewed_split = get_renewed_users_by_cycle(subscription_period_start, subscription_period_end)
@@ -1585,8 +1493,9 @@ if subscription_tab:
 
         # ---- Tier Explorer ----
         anchor("subscription-tier-explorer")
-        st.markdown(f"<div class='section-header'>Membership &amp; Subscription Tier Explorer{subscription_period_suffix}</div>",
-                    unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='section-header'>Membership &amp; Subscription Tier Explorer{subscription_period_suffix}</div>",
+            unsafe_allow_html=True)
         st.markdown(
             "<p style='color: #6B7280; font-size: 14px; margin-top: -10px; margin-bottom: 20px;'>Active subscriber allocations, price points, and estimated billing cycle yields calculated directly from live database invoices.</p>",
             unsafe_allow_html=True)
@@ -1709,7 +1618,7 @@ if subscription_tab:
             st.markdown(f"""
             <div class="chart-card">
                 <div class="figure-title">Membership Distribution</div>
-            
+
             """, unsafe_allow_html=True)
 
             membership_rows = []
@@ -1783,7 +1692,7 @@ if subscription_tab:
             st.markdown(f"""
             <div class="chart-card">
                 <div class="figure-title">Premium Users by Partner</div>
-            
+
             """, unsafe_allow_html=True)
 
             df_inv_premium_only = df_inv[df_inv["billed_plan_name"].isin(premium_plans_list)]
@@ -1809,11 +1718,8 @@ if subscription_tab:
             )
             df_p = df_p[df_p["premium_users"] > 0].sort_values("premium_users", ascending=True)
 
-            # Own local partner-revenue pull, scoped to THIS tab's period filter —
-            # not the Revenue tab's df_partner_plan, which uses a different period.
             df_partner_plan_local = dd.get_partner_revenue_by_plan(subscription_period_start, subscription_period_end)
 
-            # Merge partner revenue and plan count from this tab's own partner plan data
             if not df_partner_plan_local.empty:
                 partner_extra = df_partner_plan_local.groupby("sso_partner_name").agg(
                     total_revenue=("revenue", "sum"),
@@ -1880,30 +1786,8 @@ if subscription_tab:
         st.markdown("""
             <div class="chart-card">
                 <div class="figure-title">User Growth Trend</div>
-            
+
             """, unsafe_allow_html=True)
-
-        # =========================================================
-        # REPLACEMENT for the "User Growth Trend" block inside dashboard.py
-        # =========================================================
-        #
-        # This replaces everything from `df_growth_daily = dd.get_customer_growth_daily()`
-        # down through the `st.plotly_chart(fig, ...)` call for the growth trend chart
-        # (i.e. the content INSIDE the existing "User Growth Trend" chart-card — the
-        # card's opening `<div class="chart-card">...` and its final closing `</div>`
-        # stay exactly where they already are in your file; only the content between
-        # them changes).
-        #
-        # What changed:
-        #   - "Total Users (End of Period)" metric is removed entirely.
-        #   - "New Users (... view)" metric is kept, and moved into the same white
-        #     card as the View-by radio + date pickers (instead of its own separate
-        #     metric card below them).
-        # =========================================================
-
-        # =========================================================
-        # User Growth Trend
-        # =========================================================
 
         df_growth_daily = dd.get_customer_growth_daily()
 
@@ -1914,9 +1798,6 @@ if subscription_tab:
             min_date = df_growth_daily["date"].min().date()
             max_date = df_growth_daily["date"].max().date()
 
-            # -------------------------------------------------
-            # Filters + Metric Card
-            # -------------------------------------------------
             with st.container(border=True):
 
                 st.markdown(
@@ -1969,9 +1850,6 @@ if subscription_tab:
                     st.warning("Start date must be before end date.")
                     st.stop()
 
-                # -------------------------------------------------
-                # Filter Data
-                # -------------------------------------------------
                 df_growth_filtered = (
                     df_growth_daily[
                         (df_growth_daily["date"].dt.date >= start_date)
@@ -1981,9 +1859,6 @@ if subscription_tab:
                     .set_index("date")
                 )
 
-                # -------------------------------------------------
-                # Aggregate
-                # -------------------------------------------------
                 if granularity == "Monthly":
                     df_plot = (
                         df_growth_filtered["customers"]
@@ -2022,9 +1897,6 @@ if subscription_tab:
                     st.info("No data available for selected range.")
                     st.stop()
 
-                # -------------------------------------------------
-                # Metrics
-                # -------------------------------------------------
                 df_plot["new_users"] = (
                     df_plot["customers"]
                     .diff()
@@ -2053,10 +1925,6 @@ if subscription_tab:
                     value=f"{window_new:,}",
                 )
 
-
-            # -------------------------------------------------
-            # Chart
-            # -------------------------------------------------
             fig = px.line(
                 df_plot,
                 x="date",
@@ -2123,9 +1991,8 @@ if subscription_tab:
         st.markdown(f"""
         <div class="chart-card">
             <div class="figure-title">Conversion Funnel Stages{subscription_period_suffix}</div>
-        
-        """, unsafe_allow_html=True)
 
+        """, unsafe_allow_html=True)
 
         funnel = get_conversion_funnel(subscription_period_start, subscription_period_end)
 
@@ -2135,10 +2002,9 @@ if subscription_tab:
         funnel["pct"] = (funnel["users"] / total_max * 100).round(1)
         funnel["dropoff"] = (100 - funnel["pct"]).round(1)
 
-        # ---- Stage-to-stage lost users (vs. previous stage, not vs. total) ----
         funnel["prev_stage_users"] = funnel["users"].shift(1)
         funnel["lost"] = (funnel["prev_stage_users"] - funnel["users"]).fillna(0).astype(int)
-        funnel["lost"] = funnel["lost"].clip(lower=0)  # safety net for genuine ties only now
+        funnel["lost"] = funnel["lost"].clip(lower=0)
 
         funnel["conv_opp"] = funnel["lost"].apply(
             lambda x: f"₹{x * int(kpis.get('arpu', 0)):,}"
@@ -2147,7 +2013,6 @@ if subscription_tab:
             round(funnel["users"].iloc[i] / funnel["users"].iloc[i - 1] * 100, 1)
             for i in range(1, len(funnel))
         ]
-
 
         stage_colors = ["#1D4ED8", "#2563EB", "#3B82F6", "#93C5FD"]
 
@@ -2213,17 +2078,14 @@ if subscription_tab:
 
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-        # ---- Insight callout: biggest STAGE-TO-STAGE drop, not vs. total ----
-        funnel_with_drop = funnel[funnel["lost"] > 0]  # excludes the first stage (always 0 lost)
+        funnel_with_drop = funnel[funnel["lost"] > 0]
         if not funnel_with_drop.empty:
             worst_drop = funnel_with_drop.loc[funnel_with_drop["lost"].idxmax()]
 
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
-
         # ---- Renewal & Retention ----
-
 
         anchor("subscription-renewal-retention")
         st.markdown("<div class='section-header'>Renewal and Retention</div>", unsafe_allow_html=True)
@@ -2236,7 +2098,7 @@ if subscription_tab:
             st.markdown(f"""
             <div class="chart-card">
                 <div class="figure-title">Renewal Cohort Trend{subscription_period_suffix}</div>
-            
+
             """, unsafe_allow_html=True)
 
             df_renewal_trend = dd.get_renewal_cohort_trend(subscription_period_start, subscription_period_end)
@@ -2244,10 +2106,10 @@ if subscription_tab:
             if not df_renewal_trend.empty:
                 df_renewal_trend = df_renewal_trend.sort_values("month").reset_index(drop=True)
                 df_renewal_trend["mom_change"] = df_renewal_trend["renewed_subscribers"].diff().fillna(0).astype(int)
-                df_renewal_trend["mom_pct"] = df_renewal_trend["renewed_subscribers"].pct_change().fillna(0).mul(100).round(
+                df_renewal_trend["mom_pct"] = df_renewal_trend["renewed_subscribers"].pct_change().fillna(0).mul(
+                    100).round(
                     1)
 
-                # ── Identify important nodes: peaks, troughs, first, last, big swings ──
                 vals = df_renewal_trend["renewed_subscribers"].values
                 important_idx = set()
                 important_idx.add(0)
@@ -2261,11 +2123,11 @@ if subscription_tab:
                         important_idx.add(i)
 
                 df_key = df_renewal_trend.iloc[sorted(important_idx)].copy()
-                df_other = df_renewal_trend.iloc[[i for i in range(len(df_renewal_trend)) if i not in important_idx]].copy()
+                df_other = df_renewal_trend.iloc[
+                    [i for i in range(len(df_renewal_trend)) if i not in important_idx]].copy()
 
                 fig = go.Figure()
 
-                # Base line
                 fig.add_trace(go.Scatter(
                     x=df_renewal_trend["month"], y=df_renewal_trend["renewed_subscribers"],
                     mode="lines",
@@ -2274,7 +2136,6 @@ if subscription_tab:
                     showlegend=False, hoverinfo="skip",
                 ))
 
-                # Non-key points
                 fig.add_trace(go.Scatter(
                     x=df_other["month"], y=df_other["renewed_subscribers"],
                     mode="markers",
@@ -2289,7 +2150,6 @@ if subscription_tab:
                     ),
                 ))
 
-                # Key nodes
                 key_colors = [
                     "#10B981" if row["mom_change"] >= 0 else "#EF4444"
                     for _, row in df_key.iterrows()
@@ -2344,7 +2204,7 @@ if subscription_tab:
             st.markdown(f"""
             <div class="chart-card">
                 <div class="figure-title">Renewal Rate by Plan{subscription_period_suffix}</div>
-            
+
             """, unsafe_allow_html=True)
             df_plan_trend = dd.get_renewal_by_plan_period(subscription_period_start, subscription_period_end)
 
@@ -2392,7 +2252,8 @@ if subscription_tab:
                 st.plotly_chart(fig_plan, use_container_width=True, config={"displayModeBar": False})
 
             else:
-                df_plan_trend = df_plan_trend[df_plan_trend["renewed_users"] > 0].sort_values("renewal_rate", ascending=True)
+                df_plan_trend = df_plan_trend[df_plan_trend["renewed_users"] > 0].sort_values("renewal_rate",
+                                                                                              ascending=True)
 
                 if df_plan_trend.empty:
                     st.info("No renewals in this period.")
@@ -2430,7 +2291,7 @@ if subscription_tab:
                 <b>%{y}</b>
 
                 <br><br>
-            
+
                 Total Renewals (window)
                 <b>%{customdata[0]:,}</b>
                 <br>
@@ -2481,7 +2342,7 @@ if subscription_tab:
         st.markdown(f"""
         <div class="chart-card">
             <div class="figure-title">Renewal Rate by Partner (Trend){subscription_period_suffix}</div>
-        
+
         """, unsafe_allow_html=True)
 
         df_partner_trend = dd.get_renewal_by_partner_period(subscription_period_start, subscription_period_end)
@@ -2527,7 +2388,8 @@ if subscription_tab:
             fig_partner.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
             st.plotly_chart(fig_partner, use_container_width=True, config={"displayModeBar": False})
         else:
-            df_partner_trend = df_partner_trend[df_partner_trend["renewed_users"] > 0].sort_values("renewal_rate", ascending=True)
+            df_partner_trend = df_partner_trend[df_partner_trend["renewed_users"] > 0].sort_values("renewal_rate",
+                                                                                                   ascending=True)
 
             if df_partner_trend.empty:
                 st.info("No renewals in this period.")
@@ -2674,8 +2536,10 @@ if subscription_tab:
 
         df_renewal_status = get_renewal_status_by_plan()
         if df_renewal_status is not None and not df_renewal_status.empty:
-            total_active_nr = int(df_renewal_status[df_renewal_status["renewal_status"] == "Active"]["user_count"].sum())
-            total_non_renewal = int(df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"]["user_count"].sum())
+            total_active_nr = int(
+                df_renewal_status[df_renewal_status["renewal_status"] == "Active"]["user_count"].sum())
+            total_non_renewal = int(
+                df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"]["user_count"].sum())
             total_nr_base = total_active_nr + total_non_renewal
             non_renewal_rate = round(total_non_renewal / total_nr_base * 100, 1) if total_nr_base else 0.0
 
@@ -2684,13 +2548,14 @@ if subscription_tab:
             nr2.metric("Non-Renewal Users", f"{total_non_renewal:,}")
             nr3.metric("Non-Renewal Rate", f"{non_renewal_rate}%")
 
-            # Stacked bar: Active vs Non-Renewal per plan
             plan_order = (
                 df_renewal_status.groupby("billed_plan_name")["user_count"].sum()
                 .sort_values(ascending=True).index.tolist()
             )
-            active_by_plan = df_renewal_status[df_renewal_status["renewal_status"] == "Active"].set_index("billed_plan_name").reindex(plan_order).fillna(0)
-            nonrenewal_by_plan = df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"].set_index("billed_plan_name").reindex(plan_order).fillna(0)
+            active_by_plan = df_renewal_status[df_renewal_status["renewal_status"] == "Active"].set_index(
+                "billed_plan_name").reindex(plan_order).fillna(0)
+            nonrenewal_by_plan = df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"].set_index(
+                "billed_plan_name").reindex(plan_order).fillna(0)
 
             plan_hover_active, plan_hover_nonrenewal = [], []
             for plan in plan_order:
@@ -2698,8 +2563,10 @@ if subscription_tab:
                 nr = int(nonrenewal_by_plan.loc[plan, "user_count"])
                 plan_total = a + nr
                 rate = round(nr / plan_total * 100, 1) if plan_total else 0.0
-                plan_hover_active.append(f"<b>{plan}</b> — Active<br>Active: {a:,}<br>Non-Renewal: {nr:,}<br>Non-Renewal Rate: {rate}%")
-                plan_hover_nonrenewal.append(f"<b>{plan}</b> — Non-Renewal<br>Active: {a:,}<br>Non-Renewal: {nr:,}<br>Non-Renewal Rate: {rate}%")
+                plan_hover_active.append(
+                    f"<b>{plan}</b> — Active<br>Active: {a:,}<br>Non-Renewal: {nr:,}<br>Non-Renewal Rate: {rate}%")
+                plan_hover_nonrenewal.append(
+                    f"<b>{plan}</b> — Non-Renewal<br>Active: {a:,}<br>Non-Renewal: {nr:,}<br>Non-Renewal Rate: {rate}%")
 
             fig_nr_plan = go.Figure()
             fig_nr_plan.add_trace(go.Bar(
@@ -2724,7 +2591,6 @@ if subscription_tab:
             fig_nr_plan.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
             st.plotly_chart(fig_nr_plan, use_container_width=True, config={"displayModeBar": False})
 
-            # Monthly trend of non-renewals
             df_nr_trend = get_non_renewal_trend()
             if df_nr_trend is not None and not df_nr_trend.empty:
                 df_nr_trend = df_nr_trend.copy()
@@ -2740,10 +2606,12 @@ if subscription_tab:
                     xaxis_title="Month", yaxis_title="Non-Renewal Users",
                 )
                 fig_nr_trend.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
-                fig_nr_trend.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+                fig_nr_trend.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT,
+                                          tickfont=TICK_FONT)
                 st.plotly_chart(fig_nr_trend, use_container_width=True, config={"displayModeBar": False})
 
-            top_plan_row = df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"].sort_values("user_count", ascending=False)
+            top_plan_row = df_renewal_status[df_renewal_status["renewal_status"] == "Non-Renewal"].sort_values(
+                "user_count", ascending=False)
             if not top_plan_row.empty:
                 top_plan_name = top_plan_row.iloc[0]["billed_plan_name"]
                 top_plan_count = int(top_plan_row.iloc[0]["user_count"])
@@ -2786,10 +2654,6 @@ if engineering_tab:
         df_issues = st.session_state["engineering_issues"]
         df_activities = st.session_state["activities"]
 
-        # ---- 🔍 TEMP DEBUG: confirm real column names once, then remove this line ----
-
-
-        # ---- Safely resolve the module/area column name ONCE for the whole Engineering tab ----
         MODULE_COL = next(
             (c for c in ["application_area", "module", "area", "feature_area", "component"]
              if c in df_issues.columns),
@@ -3005,12 +2869,6 @@ if engineering_tab:
               var config = {{ displayModeBar: false, responsive: true }};
               var gd = document.getElementById('sevChart');
 
-              // Fix: Plotly caches the legend's text-fitting boxes on its first
-              // layout pass. A fixed setTimeout delay was a guess at when the
-              // iframe would be settled to its real width — unreliable across
-              // different zoom levels/environments. Instead, wait until the
-              // container's width is actually unchanged across two animation
-              // frames before ever calling Plotly.newPlot.
               function waitForStableWidth(el, cb, tries) {{
                   tries = tries || 0;
                   var w1 = el.offsetWidth;
@@ -3029,7 +2887,6 @@ if engineering_tab:
 
                   window.addEventListener('resize', function() {{ Plotly.Plots.resize(gd); }});
 
-                  // visible[0..2] track Closed/Open/Reopens; index 3 (traceTotal) is never toggled directly
                   var visible = [true, true, true];
 
                   gd.on('plotly_legendclick', function(data) {{
@@ -3045,7 +2902,7 @@ if engineering_tab:
                           }});
                           Plotly.restyle(gd, {{ x: [newTotals], text: [newTotals.map(String)] }}, [3]);
                       }}
-                      return true; // let Plotly's default legend toggle (hide/show the bar segment) proceed
+                      return true;
                   }});
               }});
           }})();
@@ -3089,7 +2946,6 @@ if engineering_tab:
                 st.selectbox("Platform", ["Column not found"], key="cls_platform", disabled=True)
                 selected_platform = "All Platforms"
 
-        # ---- Build filtered dataset: all statuses included, narrowed by Module/Release/Platform only ----
         df_cls_filtered = df_issues.copy()
 
         if MODULE_COL and selected_module != "All Modules":
@@ -3100,10 +2956,8 @@ if engineering_tab:
 
         if "platform" in df_issues.columns and selected_platform != "All Platforms":
             df_cls_filtered = df_cls_filtered[df_cls_filtered["platform"] == selected_platform]
-        # ============================================================
-        # 🧩 Helper: stacked status bars + severity-mix hover
 
-        _severity_chart_counter = {"n": 0}  # ensures a unique DOM id per call, even across reruns
+        _severity_chart_counter = {"n": 0}
 
 
         def build_status_severity_chart(df_source, group_col, title_label):
@@ -3133,10 +2987,6 @@ if engineering_tab:
             pivot["Total"] = pivot[["Open", "Closed", "Reopened"]].sum(axis=1)
             pivot = pivot.sort_values("Total", ascending=True)
 
-            # Severity mix text, computed SEPARATELY per status segment — this is the
-            # fix: previously one severity_text dict was shared across Closed/Open/
-            # Reopened hovers, so all three showed the category's overall mix instead
-            # of the mix within that specific segment.
             severity_text = {"Closed": {}, "Open": {}, "Reopened": {}}
             for cat_val in pivot.index:
                 for status_name in ["Closed", "Open", "Reopened"]:
@@ -3229,12 +3079,6 @@ if engineering_tab:
 
                 var gd = document.getElementById('{div_id}');
 
-                // Fix: Plotly caches the legend's text-fitting boxes on its first
-                // layout pass. Plotting immediately then calling resize() after a
-                // fixed delay doesn't redo that legend text-fit calculation, so
-                // it can stay truncated. Instead, wait until the container's
-                // width is actually unchanged across two animation frames before
-                // ever calling Plotly.newPlot.
                 function waitForStableWidth(el, cb, tries) {{
                     tries = tries || 0;
                     var w1 = el.offsetWidth;
@@ -3252,7 +3096,7 @@ if engineering_tab:
                     Plotly.newPlot(gd, [traceClosed, traceOpen, traceReopen, traceTotal], layout, config);
                     window.addEventListener('resize', function() {{ Plotly.Plots.resize(gd); }});
 
-                    var visible = [true, true, true];  // Closed, Open, Reopened
+                    var visible = [true, true, true];
 
                     gd.on('plotly_legendclick', function(data) {{
                         var idx = data.curveNumber;
@@ -3276,9 +3120,7 @@ if engineering_tab:
 
             st.components.v1.html(component_html, height=chart_height + 20, scrolling=False)
 
-        # ============================================================
-        # 📊 Classification charts (now filterable)
-        # ============================================================
+
         c_cl1, c_cl2 = st.columns(2, gap="large")
 
         with c_cl1:
@@ -3311,7 +3153,6 @@ if engineering_tab:
         df_mod = dd.get_module_wise_defect_distribution()
         if df_mod is not None and not df_mod.empty:
             df_mod = df_mod.rename(columns={"issue_count": "Issues"})
-            # Normalize whatever column dd.get_module_wise_defect_distribution() uses to "application_area"
             if "application_area" not in df_mod.columns and MODULE_COL and MODULE_COL in df_mod.columns:
                 df_mod = df_mod.rename(columns={MODULE_COL: "application_area"})
         elif MODULE_COL:
@@ -3455,8 +3296,6 @@ if engineering_tab:
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ---- Feature-wise Issue Summary ----
-        # ---- Feature-wise Issue Summary (own dedicated filters) ----
-
         FEATURE_COL = next(
             (c for c in ["feature", "feature_name", "feature_area"] if c in df_issues.columns),
             None
@@ -3494,12 +3333,12 @@ if engineering_tab:
             with feat_f4:
                 if "platform" in df_issues.columns:
                     feat_platform_options = ["All Platforms"] + sorted(df_issues["platform"].dropna().unique().tolist())
-                    selected_feature_platform = st.selectbox("Platform", feat_platform_options, key="feat_only_platform")
+                    selected_feature_platform = st.selectbox("Platform", feat_platform_options,
+                                                             key="feat_only_platform")
                 else:
                     st.selectbox("Platform", ["Column not found"], key="feat_only_platform", disabled=True)
                     selected_feature_platform = "All Platforms"
 
-            # ---- Build the independently-filtered dataset for this chart only ----
             df_feature_filtered = df_issues.copy()
 
             if selected_feature_only != "All Features":
@@ -3526,7 +3365,6 @@ if engineering_tab:
             st.markdown("</div>", unsafe_allow_html=True)
 
         else:
-            # Fallback: original static chart if no per-issue feature column exists
             st.markdown("""
             <div class="chart-card">
                 <div class="figure-title">Feature-wise Issue Summary</div>
@@ -3569,8 +3407,9 @@ if engineering_tab:
             st.info("No live issues found.")
         else:
             col_th1, col_th2, col_th3, col_th4, col_th5, col_th6 = st.columns([1.5, 3, 1.8, 2, 2, 1.5])
-            col_th1.markdown("<span style='font-weight:700; color:#0F172A; font-size:13px;'>Defect ID / Priority</span>",
-                             unsafe_allow_html=True)
+            col_th1.markdown(
+                "<span style='font-weight:700; color:#0F172A; font-size:13px;'>Defect ID / Priority</span>",
+                unsafe_allow_html=True)
             col_th2.markdown(
                 "<span style='font-weight:700; color:#0F172A; font-size:13px;'>Module & Bug Description</span>",
                 unsafe_allow_html=True)
@@ -3835,6 +3674,7 @@ if customer_support_tab:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
+
         # ---- Priority / Status / Channel breakdowns (bar charts, not pie) ----
         def _cs_bar_breakdown(df, cat_col, val_col, color, height=260, extra_hover_lines=None):
             """
@@ -3870,6 +3710,7 @@ if customer_support_tab:
             fig.update_xaxes(showgrid=False, zeroline=False, showticklabels=False, title_font=AXIS_FONT)
             fig.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -3917,7 +3758,8 @@ if customer_support_tab:
             """, unsafe_allow_html=True)
             _cs_bar_breakdown(get_issue_type_breakdown(), "issue_type", "count", "#F59E0B", extra_hover_lines=[
                 ("open_count", "Open/Investigating", ",.0f"), ("closed_count", "Closed", ",.0f"),
-                ("avg_resolution_hours", "Avg resolution time (resolved only)", ".1f"), ("premium_pct", "From Premium users", ".1f"),
+                ("avg_resolution_hours", "Avg resolution time (resolved only)", ".1f"),
+                ("premium_pct", "From Premium users", ".1f"),
             ])
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -3987,9 +3829,11 @@ if customer_support_tab:
             """, unsafe_allow_html=True)
             vip = get_vip_ticket_load() or {}
             v1, v2 = st.columns(2)
-            v1.metric("Premium", f"{vip.get('premium_tickets', 0):,}", f"{vip.get('premium_pct', 0)}% of total", delta_color="off",
+            v1.metric("Premium", f"{vip.get('premium_tickets', 0):,}", f"{vip.get('premium_pct', 0)}% of total",
+                      delta_color="off",
                       help=f"Avg resolution time: {vip.get('premium_avg_resolution_hours', 0)}h")
-            v2.metric("Basic", f"{vip.get('basic_tickets', 0):,}", f"{vip.get('basic_pct', 0)}% of total", delta_color="off",
+            v2.metric("Basic", f"{vip.get('basic_tickets', 0):,}", f"{vip.get('basic_pct', 0)}% of total",
+                      delta_color="off",
                       help=f"Avg resolution time: {vip.get('basic_avg_resolution_hours', 0)}h")
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -4092,7 +3936,7 @@ if customer_support_tab:
                     df_filtered["ticket_id"].astype(str).str.lower().str.contains(q, na=False) |
                     df_filtered["title"].astype(str).str.lower().str.contains(q, na=False) |
                     df_filtered["description"].astype(str).str.lower().str.contains(q, na=False)
-                ]
+                    ]
 
             df_filtered = df_filtered.sort_values("created_at", ascending=False)
 
@@ -4129,11 +3973,14 @@ if customer_support_tab:
                         </div>
                     """, unsafe_allow_html=True)
 
-                    st.markdown("<div style='font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:8px;'>Activity Log</div>", unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:8px;'>Activity Log</div>",
+                        unsafe_allow_html=True)
                     df_activity = get_ticket_activity_log(selected_ticket_id)
                     if df_activity is not None and not df_activity.empty:
                         for _, act in df_activity.iterrows():
-                            created_str = pd.to_datetime(act.get('created_at')).strftime('%d %b %Y %H:%M') if pd.notna(act.get('created_at')) else ''
+                            created_str = pd.to_datetime(act.get('created_at')).strftime('%d %b %Y %H:%M') if pd.notna(
+                                act.get('created_at')) else ''
                             st.markdown(f"""
                             <div style="border-left:2px solid #E5E7EB; padding:6px 0 6px 12px; margin-bottom:8px;">
                                 <span style="font-size:12px; font-weight:700; color:#0F172A;">{html.escape(str(act.get('activity_type', '') or ''))}</span>
@@ -4152,7 +3999,8 @@ if customer_support_tab:
                     <div class="chart-card">
                         <div class="figure-title">Reporting User</div>
                     """, unsafe_allow_html=True)
-                    premium_tag = ' <span style="color:#D97706; font-weight:700;">(Premium)</span>' if ticket_row.get('is_premium') else ''
+                    premium_tag = ' <span style="color:#D97706; font-weight:700;">(Premium)</span>' if ticket_row.get(
+                        'is_premium') else ''
                     st.markdown(f"""
                     <div style="font-size:13px; color:#0F172A; font-weight:700;">{html.escape(str(ticket_row.get('user_name', '') or ''))}</div>
                     <div style="font-size:12px; color:#6B7280; margin-bottom:10px;">{html.escape(str(ticket_row.get('company_name', '') or ''))}</div>
