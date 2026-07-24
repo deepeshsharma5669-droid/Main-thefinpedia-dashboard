@@ -1,6 +1,8 @@
 import os
 
 import numpy as np
+import streamlit as st
+from datetime import date
 from pandas.io.sql import get_engine
 from supabase import create_client, Client
 import pandas as pd
@@ -29,7 +31,15 @@ def get_permissions_for_role(role):
 
 
 # Helper function to convert table/view data directly into a Pandas DataFrame
+@st.cache_data(ttl=60)
 def _df(view_name):
+    """Cached for 60s. This is the shared foundation almost every get_*() function
+    routes through — caching it here deduplicates the many repeated fetches of the
+    same table (e.g. 'invoices' is independently re-fetched by Plan Conversions,
+    Revenue Breakdown, Daily Revenue Trend, Revenue by Plan, Revenue by Partner,
+    etc.) both within a single page render AND across reruns within the TTL window,
+    without serving badly stale data. The existing Refresh button already calls
+    st.cache_data.clear() for on-demand freshness, so this doesn't fight that."""
     page_size = 1000
     start = 0
     all_rows = []
@@ -68,6 +78,83 @@ def get_revenue_kpis(start_date=None, end_date=None):
     arpu = round(total_revenue / paying_users, 2) if paying_users else 0
 
     return {"total_revenue": total_revenue, "arpu": arpu}
+
+
+def get_revenue_pacing(start_date, end_date):
+    """Cumulative daily revenue for a period, indexed by day-in-period (1, 2, 3...)
+    rather than calendar date — used to overlay two periods of different calendar
+    dates on the same x-axis for pacing comparison. Also returns per-day cumulative
+    Monthly vs Annual billing splits (using the same >=300-day threshold as
+    get_plan_revenue_by_cycle), so a caller can look up the breakdown AS OF any
+    specific day — not just the full-period total, which would silently mismatch
+    the headline cumulative-to-date number when a period is still in progress.
+    Requires both start_date and end_date (no All Time support — pacing only
+    makes sense for a bounded period).
+    Always returns a full day-range skeleton (one row per day in the period, zero-
+    filled where there's no revenue) even if the period has zero invoices overall —
+    a genuinely empty dataframe would make day-count logic elsewhere read the period
+    as having zero elapsed days, which is wrong; a period with no revenue yet still
+    has a real length.
+    Returns: {"daily": DataFrame[day_in_period, cumulative_revenue,
+              cumulative_monthly, cumulative_yearly], "total": float,
+              "monthly_billed": float, "yearly_billed": float}
+    (total/monthly_billed/yearly_billed are the FULL-PERIOD totals; use daily's
+    cumulative_monthly/cumulative_yearly columns for as-of-a-specific-day values.)"""
+    total_days = max((end_date - start_date).days + 1, 0) if start_date and end_date else 0
+    empty_daily = pd.DataFrame({
+        "day_in_period": range(1, total_days + 1),
+        "cumulative_revenue": [0.0] * total_days,
+        "cumulative_monthly": [0.0] * total_days,
+        "cumulative_yearly": [0.0] * total_days,
+    })
+    empty = {"daily": empty_daily, "total": 0.0, "monthly_billed": 0.0, "yearly_billed": 0.0}
+    if start_date is None or end_date is None:
+        return empty
+
+    df = _df("invoices")
+    if df.empty:
+        return empty
+
+    df = df.copy()
+    df["billing_period_start_date"] = pd.to_datetime(df["billing_period_start_date"])
+    df["billing_period_end_date"] = pd.to_datetime(df["billing_period_end_date"])
+    df["amount_paid"] = pd.to_numeric(df["amount_paid"], errors="coerce").fillna(0)
+
+    df = df[
+        (df["billing_period_start_date"].dt.date >= start_date)
+        & (df["billing_period_start_date"].dt.date <= end_date)
+    ]
+    if df.empty:
+        return empty
+
+    df["billing_cycle"] = np.where(
+        (df["billing_period_end_date"] - df["billing_period_start_date"]).dt.days >= 300,
+        "Annual", "Monthly"
+    )
+    df["day_in_period"] = (df["billing_period_start_date"].dt.date - start_date).apply(lambda d: d.days + 1)
+
+    daily_sums = df.groupby("day_in_period")["amount_paid"].sum().reset_index()
+    monthly_daily_sums = df[df["billing_cycle"] == "Monthly"].groupby("day_in_period")["amount_paid"].sum().reset_index().rename(columns={"amount_paid": "monthly_amt"})
+    yearly_daily_sums = df[df["billing_cycle"] == "Annual"].groupby("day_in_period")["amount_paid"].sum().reset_index().rename(columns={"amount_paid": "yearly_amt"})
+
+    all_days = pd.DataFrame({"day_in_period": range(1, total_days + 1)})
+    daily = all_days.merge(daily_sums, on="day_in_period", how="left").fillna(0)
+    daily = daily.merge(monthly_daily_sums, on="day_in_period", how="left").fillna(0)
+    daily = daily.merge(yearly_daily_sums, on="day_in_period", how="left").fillna(0)
+    daily["cumulative_revenue"] = daily["amount_paid"].cumsum()
+    daily["cumulative_monthly"] = daily["monthly_amt"].cumsum()
+    daily["cumulative_yearly"] = daily["yearly_amt"].cumsum()
+
+    total = float(df["amount_paid"].sum())
+    monthly_billed = float(df[df["billing_cycle"] == "Monthly"]["amount_paid"].sum())
+    yearly_billed = float(df[df["billing_cycle"] == "Annual"]["amount_paid"].sum())
+
+    return {
+        "daily": daily[["day_in_period", "cumulative_revenue", "cumulative_monthly", "cumulative_yearly"]],
+        "total": total,
+        "monthly_billed": monthly_billed,
+        "yearly_billed": yearly_billed,
+    }
 
 
 def get_revenue_trend_daily(start_date=None, end_date=None):
@@ -325,6 +412,190 @@ def get_churn_rate():
         return round(100.0 - renewal_rate, 2)
     except Exception:
         return 0.0
+
+def get_financial_year_bounds(ref_date, years_back=0):
+    """Indian financial year (Apr 1 - Mar 31) bounds for the FY containing
+    ref_date, optionally shifted `years_back` FYs earlier:
+      years_back=0 -> the FY containing ref_date (e.g. Jul 2026 -> FY2026-27)
+      years_back=1 -> the previous FY (e.g. -> FY2025-26)
+      years_back=2 -> two FYs before that, etc.
+    Single source of truth for FY math so Revenue, Subscriptions, and Product
+    Usage tabs can never disagree on where a financial year starts/ends.
+    Returns (fy_start, fy_end) as date objects."""
+    fy_start_year = ref_date.year if ref_date.month >= 4 else ref_date.year - 1
+    fy_start_year -= years_back
+    fy_start = date(fy_start_year, 4, 1)
+    fy_end = date(fy_start_year + 1, 3, 31)
+    return fy_start, fy_end
+
+
+TIER_ORDER = ["Trial Plan", "Silver Plan", "Gold Plan", "Platinum Plan", "Diamond Plan"]
+TIER_RANK = {name: i for i, name in enumerate(TIER_ORDER)}
+TIER_ALIASES = {name.lower(): name for name in TIER_ORDER}
+
+
+def _canonical_tier(plan_name):
+    """Returns the canonical tier name if plan_name is one of the 5 recognized
+    tiers (case-insensitive), else None (meaning: treat as Top Up)."""
+    if not plan_name:
+        return None
+    return TIER_ALIASES.get(str(plan_name).strip().lower())
+
+
+def get_plan_conversions(start_date=None, end_date=None):
+    """
+    Plan Conversions analysis. Two independent classification passes over invoices:
+
+    1. TOP UP: every invoice whose plan isn't one of the 5 recognized tiers
+       (Trial/Silver/Gold/Platinum/Diamond) is its own Top Up event, on its own —
+       no comparison to neighboring invoices needed.
+
+    2. TIER TRANSITIONS: build each user's sequence of REAL-TIER invoices only
+       (Top Ups are skipped when building this sequence, not just excluded from
+       counting), sorted by billing_period_start_date, then classify each
+       consecutive pair:
+         - same tier, cycle changed Monthly->Yearly  => "Monthly to Yearly"
+         - same tier, cycle changed Yearly->Monthly  => "Yearly to Monthly"
+         - different tier, moved to a HIGHER tier    => "Switch Up"
+           (tagged with a cycle sub_type: Monthly to Yearly / Yearly to Monthly / Same Cycle)
+         - different tier, moved to a LOWER tier     => "Switch Down"
+           (same cycle sub_type tagging)
+         - same tier, same cycle                     => "Renewal" (tracked separately,
+           not an upgrade/downgrade, but still counted for reference)
+
+    Every event's date = the LATER invoice's billing_period_start_date in that pair
+    (or the Top Up invoice's own date). start_date/end_date filter on that date.
+    A single user can generate multiple events across their history.
+
+    Returns: {
+        "upgrade_users": int, "downgrade_users": int,
+        "conversion_revenue": float, "revenue_lost_to_downgrade": float,
+        "breakdown": {event_type: {"count": int, "unique_users": int,
+                                    "sub_distribution": {..} (Switch Up/Down only)}},
+        "events": DataFrame[user_id, event_type, sub_type, previous_plan,
+                            current_plan, amount_paid, prev_amount, date]
+    }
+    """
+    empty_events = pd.DataFrame(columns=[
+        "user_id", "event_type", "sub_type", "previous_plan",
+        "current_plan", "amount_paid", "prev_amount", "date"
+    ])
+    empty_result = {
+        "upgrade_users": 0, "downgrade_users": 0,
+        "conversion_revenue": 0.0, "revenue_lost_to_downgrade": 0.0,
+        "breakdown": {
+            k: {"count": 0, "unique_users": 0, **({"sub_distribution": {}} if k in ("Switch Up", "Switch Down") else {})}
+            for k in ["Monthly to Yearly", "Yearly to Monthly", "Top Up", "Switch Up", "Switch Down", "Renewal"]
+        },
+        "events": empty_events,
+    }
+
+    df = _df("invoices")
+    if df.empty:
+        return empty_result
+
+    df = df[~df["user_id"].isin([128, 130])].copy()
+    df["billing_period_start_date"] = pd.to_datetime(df["billing_period_start_date"])
+    df["billing_period_end_date"] = pd.to_datetime(df["billing_period_end_date"])
+    df["amount_paid"] = pd.to_numeric(df["amount_paid"], errors="coerce").fillna(0)
+
+    df["billing_cycle"] = np.where(
+        (df["billing_period_end_date"] - df["billing_period_start_date"]).dt.days >= 300,
+        "Yearly", "Monthly"
+    )
+    df["tier"] = df["billed_plan_name"].apply(_canonical_tier)
+    df["tier_rank"] = df["tier"].map(TIER_RANK)
+
+    events = []
+
+    # --- Pass 1: Top Up events, one per invoice, independent of neighbors ---
+    topup_df = df[df["tier"].isna()]
+    for _, row in topup_df.iterrows():
+        events.append({
+            "user_id": row["user_id"], "event_type": "Top Up", "sub_type": None,
+            "previous_plan": None, "current_plan": row["billed_plan_name"],
+            "amount_paid": row["amount_paid"], "prev_amount": None,
+            "date": row["billing_period_start_date"].date(),
+        })
+
+    # --- Pass 2: tier transitions, built from real-tier invoices only (Top Ups skipped) ---
+    tier_df = df[df["tier"].notna()].copy()
+    for user_id, group in tier_df.groupby("user_id"):
+        group = group.sort_values("billing_period_start_date").reset_index(drop=True)
+        for i in range(1, len(group)):
+            prev_row, curr_row = group.iloc[i - 1], group.iloc[i]
+            prev_tier, curr_tier = prev_row["tier"], curr_row["tier"]
+            prev_cycle, curr_cycle = prev_row["billing_cycle"], curr_row["billing_cycle"]
+
+            if prev_tier == curr_tier and prev_cycle == curr_cycle:
+                events.append({
+                    "user_id": user_id, "event_type": "Renewal", "sub_type": None,
+                    "previous_plan": prev_tier, "current_plan": curr_tier,
+                    "amount_paid": curr_row["amount_paid"], "prev_amount": prev_row["amount_paid"],
+                    "date": curr_row["billing_period_start_date"].date(),
+                })
+                continue
+
+            if prev_tier == curr_tier:
+                event_type = "Monthly to Yearly" if (prev_cycle == "Monthly" and curr_cycle == "Yearly") else "Yearly to Monthly"
+                sub_type = None
+            else:
+                event_type = "Switch Up" if curr_row["tier_rank"] > prev_row["tier_rank"] else "Switch Down"
+                if prev_cycle == "Monthly" and curr_cycle == "Yearly":
+                    sub_type = "Monthly to Yearly"
+                elif prev_cycle == "Yearly" and curr_cycle == "Monthly":
+                    sub_type = "Yearly to Monthly"
+                else:
+                    sub_type = "Same Cycle"
+
+            events.append({
+                "user_id": user_id, "event_type": event_type, "sub_type": sub_type,
+                "previous_plan": prev_tier, "current_plan": curr_tier,
+                "amount_paid": curr_row["amount_paid"], "prev_amount": prev_row["amount_paid"],
+                "date": curr_row["billing_period_start_date"].date(),
+            })
+
+    if not events:
+        return empty_result
+
+    events_df = pd.DataFrame(events)
+
+    if start_date is not None:
+        events_df = events_df[events_df["date"] >= start_date]
+    if end_date is not None:
+        events_df = events_df[events_df["date"] <= end_date]
+
+    if events_df.empty:
+        return empty_result
+
+    upgrade_types = {"Monthly to Yearly", "Switch Up"}
+    downgrade_types = {"Yearly to Monthly", "Switch Down"}
+
+    upgrade_users = int(events_df[events_df["event_type"].isin(upgrade_types)]["user_id"].nunique())
+    downgrade_users = int(events_df[events_df["event_type"].isin(downgrade_types)]["user_id"].nunique())
+    conversion_revenue = float(events_df["amount_paid"].sum())
+
+    downgrade_events = events_df[events_df["event_type"].isin(downgrade_types)].copy()
+    downgrade_events["loss"] = (downgrade_events["prev_amount"] - downgrade_events["amount_paid"]).clip(lower=0)
+    revenue_lost = float(downgrade_events["loss"].sum())
+
+    breakdown = {}
+    for event_type in ["Monthly to Yearly", "Yearly to Monthly", "Top Up", "Switch Up", "Switch Down", "Renewal"]:
+        sub = events_df[events_df["event_type"] == event_type]
+        entry = {"count": int(len(sub)), "unique_users": int(sub["user_id"].nunique())}
+        if event_type in ("Switch Up", "Switch Down"):
+            entry["sub_distribution"] = sub["sub_type"].value_counts().to_dict()
+        breakdown[event_type] = entry
+
+    return {
+        "upgrade_users": upgrade_users,
+        "downgrade_users": downgrade_users,
+        "conversion_revenue": conversion_revenue,
+        "revenue_lost_to_downgrade": revenue_lost,
+        "breakdown": breakdown,
+        "events": events_df.sort_values("date", ascending=False).reset_index(drop=True),
+    }
+
 
 def get_monthly_to_yearly_conversions(start_date=None, end_date=None):
     """
@@ -1175,18 +1446,64 @@ def get_ticket_issue_mapping(ticket_id):
     return pd.DataFrame(result.data or [])
 
 
+def _get_renewal_events(start_date=None, end_date=None):
+    """Shared 'strict renewal' detector — same tier AND same billing cycle,
+    on CONSECUTIVE invoices only — mirroring the Renewal branch inside
+    get_plan_conversions()'s tier-transition pass. Kept as a standalone
+    helper (rather than reusing get_plan_conversions()'s own events output)
+    so the Revenue tab's Plan Conversions table/schema is left untouched.
+    Returns a list of {"user_id", "cycle", "date"} dicts, one per renewal
+    event found anywhere in the user's history that falls inside
+    [start_date, end_date]."""
+    df = _df("invoices")
+    if df.empty:
+        return []
+
+    df = df[~df["user_id"].isin([128, 130])].copy()
+    df["billing_period_start_date"] = pd.to_datetime(df["billing_period_start_date"])
+    df["billing_period_end_date"] = pd.to_datetime(df["billing_period_end_date"])
+    df["billing_cycle"] = np.where(
+        (df["billing_period_end_date"] - df["billing_period_start_date"]).dt.days >= 300,
+        "Yearly", "Monthly"
+    )
+    df["tier"] = df["billed_plan_name"].apply(_canonical_tier)
+
+    tier_df = df[df["tier"].notna()].copy()
+    events = []
+    for user_id, group in tier_df.groupby("user_id"):
+        group = group.sort_values("billing_period_start_date").reset_index(drop=True)
+        for i in range(1, len(group)):
+            prev_row, curr_row = group.iloc[i - 1], group.iloc[i]
+            if prev_row["tier"] == curr_row["tier"] and prev_row["billing_cycle"] == curr_row["billing_cycle"]:
+                event_date = curr_row["billing_period_start_date"].date()
+                if start_date is not None and event_date < start_date:
+                    continue
+                if end_date is not None and event_date > end_date:
+                    continue
+                events.append({
+                    "user_id": user_id,
+                    "cycle": curr_row["billing_cycle"],
+                    "date": event_date,
+                })
+    return events
+
+
 def get_renewal_kpis(start_date=None, end_date=None):
-    """Replicates the renewal_metrics view's logic: a user is 'renewed' if they
-    have 2+ invoices for the same premium plan. Uses the user's FULL invoice
-    history to determine whether each invoice is a first-time purchase or a
-    renewal (invoice_rank >= 1), THEN scopes to which invoice EVENTS fall
-    inside [start_date, end_date] — this preserves renewal detection even when
-    the user's earlier (proving) invoice falls outside the window.
-    None = All Time (matches the original view exactly, since with no filter
-    every invoice event is in scope)."""
+    """Renewed Users / Renewal Rate — 'renewed' now means the SAME strict
+    definition used by the Revenue tab's Plan Conversions breakdown: same
+    tier, same billing cycle, AND consecutive invoices only (via
+    _get_renewal_events). This replaces the old cycle-blind, order-blind
+    (user_id, billed_plan_name) groupby logic, so the Subscriptions tab's
+    'Renewed Users' now always matches the Revenue tab's 'Renewal' count for
+    the same period.
+    None = All Time."""
+    renewed_users = len({e["user_id"] for e in _get_renewal_events(start_date, end_date)})
+
+    # Denominator (total user+plan combos active in the window) kept as
+    # before — independent of the Renewal redefinition above.
     df = _df("invoices")
     if df.empty or "user_id" not in df.columns or "billed_plan_name" not in df.columns:
-        return {"renewed_users": 0, "renewal_rate": 0}
+        return {"renewed_users": renewed_users, "renewal_rate": 0}
 
     df = df.copy()
     df["billing_period_start_date"] = pd.to_datetime(df["billing_period_start_date"])
@@ -1194,22 +1511,13 @@ def get_renewal_kpis(start_date=None, end_date=None):
     plans = ["Silver Plan", "Gold Plan", "Platinum Plan", "Diamond Plan", "Trial Plan"]
     df = df[df["billed_plan_name"].isin(plans)]
 
-    # Rank each user+plan's invoices by date using the FULL history — rank 0 is
-    # their first-ever invoice for that plan, rank 1+ is a renewal.
-    df = df.sort_values("billing_period_start_date")
-    df["invoice_rank"] = df.groupby(["user_id", "billed_plan_name"]).cumcount()
-
-    # NOW scope to which invoice events fall inside the window.
     df_period = df
     if start_date is not None:
         df_period = df_period[df_period["billing_period_start_date"].dt.date >= start_date]
     if end_date is not None:
         df_period = df_period[df_period["billing_period_start_date"].dt.date <= end_date]
 
-    # "Eligible" groups = user+plan combos with at least one invoice event in the window.
-    grouped = df_period.groupby(["user_id", "billed_plan_name"])["invoice_rank"].max().reset_index()
-    total = len(grouped)
-    renewed_users = int((grouped["invoice_rank"] >= 1).sum())
+    total = df_period.groupby(["user_id", "billed_plan_name"]).ngroups
     renewal_rate = round(100.0 * renewed_users / total, 2) if total else 0
 
     return {"renewed_users": renewed_users, "renewal_rate": renewal_rate}
@@ -1249,62 +1557,30 @@ def get_user_kpis(start_date=None, end_date=None):
 
 def get_renewed_users_by_cycle(start_date=None, end_date=None):
     """
-    Splits "renewed users" (users with 2+ invoices, i.e. they came back
-    for at least one more billing cycle) into Monthly vs Annual.
-    Scoped to the SAME 5 plans as get_renewal_kpis (Silver/Gold/Platinum/
-    Diamond/Trial) so Monthly + Annual always sums to that KPI's
-    'Renewed Users' number. Top Up is still excluded.
-    Uses the user's FULL invoice history to determine renewed status
-    (invoice_rank >= 1), THEN scopes to which invoice EVENTS fall inside
-    [start_date, end_date] — this preserves renewal detection even when the
-    user's earlier (proving) invoice falls outside the window. The cycle
-    (Monthly/Annual) used is that of the in-window renewal invoice itself.
+    Splits "renewed users" into Monthly vs Yearly, using the SAME strict
+    renewal definition as get_renewal_kpis / get_plan_conversions: same
+    tier, same billing cycle, AND consecutive invoices only (via
+    _get_renewal_events). Monthly + Yearly always sums to
+    get_renewal_kpis()'s 'Renewed Users' number, which itself now matches
+    the Revenue tab's Renewal count.
     None = All Time.
 
     Returns: {"monthly_renewed": int, "yearly_renewed": int}
     """
-    df = _df("invoices")
-    if df.empty:
+    events = _get_renewal_events(start_date, end_date)
+    if not events:
         return {"monthly_renewed": 0, "yearly_renewed": 0}
 
-    df = df[~df["user_id"].isin([128, 130])].copy()
-
-    df["billing_period_start_date"] = pd.to_datetime(df["billing_period_start_date"])
-    df["billing_period_end_date"] = pd.to_datetime(df["billing_period_end_date"])
-
-    df["billing_cycle"] = np.where(
-        (df["billing_period_end_date"] - df["billing_period_start_date"]).dt.days >= 300,
-        "Annual", "Monthly"
-    )
-
-    premium_plans = ["Silver Plan", "Gold Plan", "Platinum Plan", "Diamond Plan", "Trial Plan"]
-    df = df[df["billed_plan_name"].isin(premium_plans)]
-
-    # Rank each user's invoices using the FULL history — rank 0 is their
-    # first-ever invoice, rank 1+ is a renewal.
-    df = df.sort_values("billing_period_start_date")
-    df["invoice_rank"] = df.groupby(["user_id", "billed_plan_name"]).cumcount()
-
-    # NOW scope to which invoice events fall inside the window.
-    df_period = df
-    if start_date is not None:
-        df_period = df_period[df_period["billing_period_start_date"].dt.date >= start_date]
-    if end_date is not None:
-        df_period = df_period[df_period["billing_period_start_date"].dt.date <= end_date]
-
-    # Renewal events in this window = invoices with rank >= 1
-    df_renewed = df_period[df_period["invoice_rank"] >= 1].copy()
-
-    # Classify each renewed user by the cycle of their most recent renewal
-    # invoice within the window (a user could have 2+ renewal invoices in
-    # the same window if they upgraded mid-period).
+    df_events = pd.DataFrame(events)
+    # A user could have 2+ renewal events in the same window (e.g. renewed
+    # more than once); classify by their most recent one, same as before.
     df_latest = (
-        df_renewed.sort_values("billing_period_start_date")
+        df_events.sort_values("date")
         .drop_duplicates(subset=["user_id"], keep="last")
     )
 
-    monthly_renewed = int((df_latest["billing_cycle"] == "Monthly").sum())
-    yearly_renewed = int((df_latest["billing_cycle"] == "Annual").sum())
+    monthly_renewed = int((df_latest["cycle"] == "Monthly").sum())
+    yearly_renewed = int((df_latest["cycle"] == "Yearly").sum())
 
     return {"monthly_renewed": monthly_renewed, "yearly_renewed": yearly_renewed}
 
@@ -1633,6 +1909,7 @@ def get_status_by_platform():
     return _df("product_usage_status_by_platform")
 
 
+@st.cache_data(ttl=60)
 def get_status_by_platform_period(start_date, end_date):
     """Calls get_status_breakdown_by_platform_period(p_start_date, p_end_date) -> posting_status,
     platform_name, count. Scoped by scheduled_for, same as Platform Usage. (None, None) = All Time."""
@@ -1781,6 +2058,7 @@ def get_non_renewal_trend():
     return _df("non_renewal_trend")
 
 
+@st.cache_data(ttl=60)
 def get_product_usage_period_kpis(start_date, end_date, include_post_planner=True):
     """Calls the get_product_usage_period_kpis Postgres function -> new_users,
     total_activities, avg_actions_per_user, scoped to [start_date, end_date].
@@ -1794,10 +2072,30 @@ def get_product_usage_period_kpis(start_date, end_date, include_post_planner=Tru
     return rows[0] if rows else {}
 
 
+@st.cache_data(ttl=60)
+def get_product_usage_monthly_breakdown(include_post_planner=True):
+    """Calls get_product_usage_monthly_breakdown(p_include_post_planner) -> month,
+    new_users, total_activities, avg_actions_per_user for the trailing 12 months.
+    Uses the EXACT SAME underlying logic as get_product_usage_period_kpis
+    (new_users = users.registered_at count, total_activities = activity table
+    count with Post Planner filter, avg_actions_per_user = total_activities /
+    new_users), just grouped by month instead of a single period — so this
+    breakdown always agrees with the KPI card it's shown alongside."""
+    result = supabase.rpc("get_product_usage_monthly_breakdown", {
+        "p_include_post_planner": include_post_planner,
+    }).execute()
+    df = pd.DataFrame(result.data)
+    if not df.empty and "month" in df.columns:
+        df["month"] = pd.to_datetime(df["month"])
+        df = df.sort_values("month")
+    return df
+
+
 # ============================================================
 # 📅 PERIOD-AWARE VERSIONS — Feature Usage, Platform Usage,
 # SSO Partner Usage, Campaign Performance (Product Usage tab)
 # ============================================================
+@st.cache_data(ttl=60)
 def get_feature_usage_period(start_date, end_date):
     """Calls get_feature_usage_period(p_start_date, p_end_date) -> feature_type,
     events, unique_users (top 5). (None, None) = All Time."""
@@ -1808,6 +2106,7 @@ def get_feature_usage_period(start_date, end_date):
     return pd.DataFrame(result.data)
 
 
+@st.cache_data(ttl=60)
 def get_platform_usage_period(start_date, end_date):
     """Calls get_platform_usage_period(p_start_date, p_end_date) -> platform_name,
     posts, share_pct, success_rate, distinct_users. Scoped by scheduled_for.
@@ -1819,6 +2118,7 @@ def get_platform_usage_period(start_date, end_date):
     return pd.DataFrame(result.data)
 
 
+@st.cache_data(ttl=60)
 def get_sso_partner_usage_period(start_date, end_date, include_post_planner=True):
     """Calls get_sso_partner_usage_period(p_start_date, p_end_date, p_include_post_planner)
     -> sso_partner_name, total_users (all-time cumulative), active_users (period-scoped),
@@ -1831,6 +2131,7 @@ def get_sso_partner_usage_period(start_date, end_date, include_post_planner=True
     return pd.DataFrame(result.data)
 
 
+@st.cache_data(ttl=60)
 def get_campaign_performance_period(start_date, end_date):
     """Calls get_campaign_performance_period(p_start_date, p_end_date) -> total_scheduled_posts,
     posted, failed, pending, scheduled, publishing_success_rate, automation_rate.

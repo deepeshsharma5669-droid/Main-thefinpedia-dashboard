@@ -4,6 +4,7 @@ import html
 import streamlit.components.v1 as components
 import plotly.express as px
 import plotly.graph_objects as go
+from chat_widget import show_chat
 from product_usage import show_product_usage
 from user_360 import show_user_360
 from content_usage import show_content_usage
@@ -960,6 +961,9 @@ content_analytics_tab = tab_map.get("Content Analytics")
 customer_support_tab = tab_map.get("Customer Support")
 user_360_tab = tab_map.get("User 360")
 
+# ---- Floating chat bubble — persists across every tab, not tied to Revenue ----
+show_chat()
+
 # ═══════════════════════════════════════════════════════
 # TAB 1 — REVENUE
 # ═══════════════════════════════════════════════════════
@@ -969,80 +973,161 @@ if revenue_tab:
         with st.sidebar:
             render_nav_rail()
 
-        def _resolve_revenue_period(period_label):
-            """Converts a period label into (start_date, end_date) as date objects.
-            Returns (None, None) for 'All Time' — meaning no date filtering at all."""
+        REVENUE_COMPARISON_OPTIONS = ["This Month", "Last Month", "This Quarter", "Last Quarter", "This Year", "Last Year", "All Time"]
+
+        def _resolve_revenue_comparison_period(label):
+            """Resolves any of the comparison-dropdown options into (start_date, end_date).
+            'All Time' returns (None, None). 'This Year' = financial-year-to-date
+            (Apr 1 of the current FY through today) and 'Last Year' = the full
+            previous financial year (Apr 1 - Mar 31) — per company convention,
+            not the calendar year. Uses dd.get_financial_year_bounds() so this
+            always agrees with Subscriptions and Product Usage."""
             today = date.today()
-            if period_label == "This Month":
-                start = today.replace(day=1)
-                end = today
-            elif period_label == "Last Month":
-                first_of_this_month = today.replace(day=1)
-                end = first_of_this_month - timedelta(days=1)
-                start = end.replace(day=1)
-            elif period_label == "This Year":
-                start = today.replace(month=1, day=1)
-                end = today
+            if label == "This Month":
+                return today.replace(day=1), today
+            elif label == "Last Month":
+                end = today.replace(day=1) - timedelta(days=1)
+                return end.replace(day=1), end
+            elif label == "This Quarter":
+                q_start_month = ((today.month - 1) // 3) * 3 + 1
+                return today.replace(month=q_start_month, day=1), today
+            elif label == "Last Quarter":
+                q_start_month = ((today.month - 1) // 3) * 3 + 1
+                this_q_start = today.replace(month=q_start_month, day=1)
+                last_q_end = this_q_start - timedelta(days=1)
+                last_q_start_month = ((last_q_end.month - 1) // 3) * 3 + 1
+                return last_q_end.replace(month=last_q_start_month, day=1), last_q_end
+            elif label == "This Year":
+                fy_start, _ = dd.get_financial_year_bounds(today, years_back=0)
+                return fy_start, today
+            elif label == "Last Year":
+                return dd.get_financial_year_bounds(today, years_back=1)
             else:  # "All Time"
-                start, end = None, None
-            return start, end
+                return None, None
 
         anchor("revenue-overview")
-        header_left, header_right = st.columns([3, 1])
+        header_left, header_right = st.columns([2.4, 3])
         with header_left:
             st.markdown("<div class='section-header'>Revenue Overview</div>", unsafe_allow_html=True)
         with header_right:
-            revenue_period_label = st.selectbox(
-                "Period", ["This Month", "Last Month", "This Year", "All Time"],
-                index=3, key="revenue_period_filter", label_visibility="collapsed",
-            )
-        revenue_period_start, revenue_period_end = _resolve_revenue_period(revenue_period_label)
+            rev_cmp_col_a, rev_cmp_col_vs, rev_cmp_col_b = st.columns([2, 0.4, 2])
+            with rev_cmp_col_a:
+                revenue_period_a_label = st.selectbox(
+                    "Compare", REVENUE_COMPARISON_OPTIONS, index=REVENUE_COMPARISON_OPTIONS.index("All Time"),
+                    key="revenue_period_a", label_visibility="collapsed",
+                )
+            with rev_cmp_col_vs:
+                st.markdown("<div style='text-align:center; padding-top:8px; color:#6B7280;'>vs</div>", unsafe_allow_html=True)
+            with rev_cmp_col_b:
+                revenue_period_b_locked = revenue_period_a_label == "All Time"
+                revenue_period_b_options = [opt for opt in REVENUE_COMPARISON_OPTIONS if opt != revenue_period_a_label]
+                if st.session_state.get("revenue_period_b") not in revenue_period_b_options:
+                    st.session_state["revenue_period_b"] = revenue_period_b_options[0]
+                revenue_period_b_label = st.selectbox(
+                    "vs", revenue_period_b_options,
+                    key="revenue_period_b", label_visibility="collapsed",
+                    disabled=revenue_period_b_locked,
+                    help="Pick a period on the left other than All Time to unlock this." if revenue_period_b_locked else None,
+                )
+        revenue_period_start, revenue_period_end = _resolve_revenue_comparison_period(revenue_period_a_label)
+        revenue_period_b_start, revenue_period_b_end = _resolve_revenue_comparison_period(revenue_period_b_label)
+        revenue_period_label = revenue_period_a_label  # alias for charts not yet migrated to full comparison
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ---- KPI Row ----
         c1, c2, c3 = st.columns(3)
 
+        def _trend(current, previous, suffix="vs last month", small_base_threshold=10):
+            """Returns a signed relative-% delta string for st.metric, or None if previous
+            is missing/zero. If previous is below small_base_threshold, returns the raw
+            count change instead of a wild percentage (e.g. 1 -> 39 misleadingly reads
+            as +3800%)."""
+            if current is None or previous is None:
+                return None
+            if previous == 0:
+                return None
+            if previous < small_base_threshold:
+                diff = current - previous
+                return f"{diff:+,.0f} {suffix}"
+            pct = round((current - previous) / previous * 100, 1)
+            return f"{pct:+.1f}% {suffix}"
+
         revenue_kpis = get_revenue_kpis(revenue_period_start, revenue_period_end)
         revenue_kpi_suffix = "" if revenue_period_label == "All Time" else f" — {revenue_period_label}"
 
-        c1.metric(
-            f"Total Revenue{revenue_kpi_suffix}",
-            f"₹ {revenue_kpis['total_revenue']:,.0f}",
-            help="Gross platform earnings accumulated across all paid subscriber categories, subscription renewals, plan upgrades, and individual top-ups." + ("" if revenue_period_label == "All Time" else f" Scoped to {revenue_period_label} (by billing_period_start_date).")
-        )
-        c2.metric(
-            f"ARPU{revenue_kpi_suffix}",
-            f"₹ {revenue_kpis['arpu']:,.0f}",
-            help="Average Revenue Per User: Calculated as Total Revenue divided by your total count of active paying or contract-holding accounts." + ("" if revenue_period_label == "All Time" else f" Scoped to {revenue_period_label} (by billing_period_start_date).")
-        )
+        if revenue_period_a_label == "All Time":
+            c1.metric(
+                f"Total Revenue{revenue_kpi_suffix}",
+                f"₹ {revenue_kpis['total_revenue']:,.0f}",
+                help="Gross platform earnings accumulated across all paid subscriber categories, subscription renewals, plan upgrades, and individual top-ups."
+            )
+            c2.metric(
+                f"ARPU{revenue_kpi_suffix}",
+                f"₹ {revenue_kpis['arpu']:,.0f}",
+                help="Average Revenue Per User: Calculated as Total Revenue divided by your total count of active paying or contract-holding accounts."
+            )
+        else:
+            revenue_kpis_b = get_revenue_kpis(revenue_period_b_start, revenue_period_b_end)
+            cmp_suffix_rev = f"vs {revenue_period_b_label}"
+            c1.metric(
+                f"Total Revenue{revenue_kpi_suffix}",
+                f"₹ {revenue_kpis['total_revenue']:,.0f}",
+                _trend(revenue_kpis['total_revenue'], revenue_kpis_b['total_revenue'], cmp_suffix_rev),
+                help=f"Gross platform earnings during {revenue_period_a_label} (by billing_period_start_date). Compared {cmp_suffix_rev}."
+            )
+            c2.metric(
+                f"ARPU{revenue_kpi_suffix}",
+                f"₹ {revenue_kpis['arpu']:,.0f}",
+                _trend(revenue_kpis['arpu'], revenue_kpis_b['arpu'], cmp_suffix_rev),
+                help=f"Average Revenue Per User during {revenue_period_a_label}. Compared {cmp_suffix_rev}."
+            )
 
         subscriber_kpis = get_subscriber_kpis(revenue_period_start, revenue_period_end)
-        if revenue_period_label == "All Time":
+        if revenue_period_a_label == "All Time":
             subscriber_main_label = "Total Subscribers"
             subscriber_main_value = subscriber_kpis["total_subscribers"]
-            subscriber_tooltip = "All users who have ever paid for a Silver, Gold, Platinum, Diamond, or Trial plan — including expired subscriptions. Active reflects only those whose most recent plan is still within its billing period today."
+            subscriber_tooltip = "All users who have ever paid for a Silver, Gold, Platinum, Diamond, or Trial plan, including expired subscriptions. Active reflects only those whose most recent plan is still within its billing period today."
+            subscriber_delta_html = ""
         else:
+            subscriber_kpis_b = get_subscriber_kpis(revenue_period_b_start, revenue_period_b_end)
             subscriber_main_label = "New Subscribers"
             subscriber_main_value = subscriber_kpis["new_subscribers"]
-            subscriber_tooltip = f"Users whose first-ever Silver/Gold/Platinum/Diamond/Trial subscription started during {revenue_period_label}. Active reflects the current live snapshot, not scoped to this period."
+            subscriber_tooltip = f"Users whose first-ever Silver/Gold/Platinum/Diamond/Trial subscription started during {revenue_period_a_label}, compared vs {revenue_period_b_label}. Active reflects the current live snapshot, not scoped to this period."
+            sub_trend = _trend(subscriber_kpis["new_subscribers"], subscriber_kpis_b["new_subscribers"], f"vs {revenue_period_b_label}")
+            if sub_trend:
+                sub_trend_color = "#059669" if sub_trend.startswith("+") else "#DC2626"
+                subscriber_delta_html = f'<span style="font-size:11px;color:{sub_trend_color};font-weight:700;">{sub_trend}</span>'
+            else:
+                subscriber_delta_html = ""
 
+        pc = get_plan_conversions(revenue_period_start, revenue_period_end)
+        renewal_count = pc["breakdown"]["Renewal"]["unique_users"]
+
+        c3_html = (
+            '<div style="background:white;border:1px solid #EAECF0;border-radius:12px;'
+            'padding:16px 20px;height:100%;display:flex;align-items:center;'
+            'justify-content:space-between;font-family:\'Manrope\',sans-serif;" '
+            f'title="{subscriber_tooltip}">'
+            '<div style="display:flex;flex-direction:column;gap:4px;">'
+            f'<span style="font-size:12px;color:#6B7280;font-weight:600;letter-spacing:0.02em;">{subscriber_main_label}</span>'
+            f'<span style="font-size:28px;font-weight:800;color:#0F172A;letter-spacing:-0.5px;">{subscriber_main_value:,}</span>'
+            f'{subscriber_delta_html}'
+            '</div>'
+            '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;padding-left:16px;'
+            'border-left:1px solid #EAECF0;" '
+            f'title="Users whose most recent invoice in this period is the same plan and billing cycle as their previous invoice (a plain renewal, not a new subscriber or a conversion).">'
+            '<span style="font-size:11px;color:#6B7280;font-weight:600;letter-spacing:0.02em;">Renewal</span>'
+            f'<span style="font-size:22px;font-weight:800;color:#7C3AED;letter-spacing:-0.4px;">{renewal_count:,}</span>'
+            '</div>'
+            '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;padding-left:16px;'
+            'border-left:1px solid #EAECF0;">'
+            '<span style="font-size:11px;color:#6B7280;font-weight:600;letter-spacing:0.02em;">Active</span>'
+            f'<span style="font-size:22px;font-weight:800;color:#2563EB;letter-spacing:-0.4px;">{subscriber_kpis["active_subscribers"]:,}</span>'
+            '</div>'
+            '</div>'
+        )
         with c3:
-            st.markdown(f"""
-            <div style="background:white;border:1px solid #EAECF0;border-radius:12px;
-                        padding:16px 20px;height:100%;display:flex;align-items:center;
-                        justify-content:space-between;font-family:'Manrope',sans-serif;"
-                 title="{subscriber_tooltip}">
-                <div style="display:flex;flex-direction:column;gap:4px;">
-                    <span style="font-size:12px;color:#6B7280;font-weight:600;letter-spacing:0.02em;">{subscriber_main_label}</span>
-                    <span style="font-size:28px;font-weight:800;color:#0F172A;letter-spacing:-0.5px;">{subscriber_main_value:,}</span>
-                </div>
-                <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;padding-left:16px;
-                            border-left:1px solid #EAECF0;">
-                    <span style="font-size:11px;color:#6B7280;font-weight:600;letter-spacing:0.02em;">Active</span>
-                    <span style="font-size:22px;font-weight:800;color:#2563EB;letter-spacing:-0.4px;">{subscriber_kpis['active_subscribers']:,}</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(c3_html, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1051,17 +1136,31 @@ if revenue_tab:
         total_rev = df_contrib["revenue"].sum()
         df_contrib = df_contrib.sort_values("revenue", ascending=False)
 
+        if revenue_period_a_label != "All Time":
+            df_contrib_b = get_revenue_contribution(revenue_period_b_start, revenue_period_b_end)
+            contrib_b_map = dict(zip(df_contrib_b["revenue_type"], df_contrib_b["revenue"]))
+        else:
+            contrib_b_map = {}
+
         breakdown_items = ""
         for _, row in df_contrib.iterrows():
             pct = round((row["revenue"] / total_rev) * 100, 1) if total_rev else 0
+            delta_line = ""
+            if revenue_period_a_label != "All Time":
+                prev_val = contrib_b_map.get(row["revenue_type"], 0)
+                if prev_val:
+                    delta_pct = round((row["revenue"] - prev_val) / prev_val * 100, 1)
+                    delta_color = "#059669" if delta_pct >= 0 else "#DC2626"
+                    delta_line = f'<span style="font-size:10px;color:{delta_color};font-weight:700;">{delta_pct:+.1f}% vs {revenue_period_b_label}</span>'
             breakdown_items += f"""
             <div style="display:flex;flex-direction:column;gap:3px;padding:0 28px;border-left:1px solid #E5E7EB;flex:1;">
                 <span style="font-size:10px;color:#9CA3AF;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;">{row['revenue_type']}</span>
                 <span style="font-size:19px;font-weight:800;color:#0F172A;letter-spacing:-0.5px;">&#8377; {row['revenue']:,.0f}</span>
                 <span style="font-size:11px;color:#2563EB;font-weight:700;">{pct}% of total</span>
+                {delta_line}
             </div>"""
 
-        breakdown_subtitle = "By subscription type" if revenue_period_label == "All Time" else f"By subscription type — {revenue_period_label}"
+        breakdown_subtitle = "By subscription type" if revenue_period_a_label == "All Time" else f"By subscription type — {revenue_period_a_label} vs {revenue_period_b_label}"
         st.components.v1.html(f"""
         <div style="font-family:'Manrope',sans-serif;background:white;border:1px solid #EAECF0;
                     border-radius:12px;padding:18px 24px;display:flex;align-items:center;gap:0;">
@@ -1071,57 +1170,146 @@ if revenue_tab:
             </div>
             {breakdown_items}
         </div>
-        """, height=100)
+        """, height=120)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ---- Figure 1: Revenue Trend ----
         anchor("monthly-revenue-trend")
-        st.markdown(f"""
-        <div class="chart-card">
-            <div class="figure-title">Daily Revenue Trend{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
-        
-        """, unsafe_allow_html=True)
 
-        df = get_revenue_trend_daily(revenue_period_start, revenue_period_end)
+        if revenue_period_a_label == "All Time":
+            st.markdown("""
+            <div class="chart-card">
+                <div class="figure-title">Daily Revenue Trend</div>
+            
+            """, unsafe_allow_html=True)
 
-        fig = px.line(df, x="date", y="revenue")
-        fig.update_traces(
-            mode="lines+markers",
-            line=dict(color=BLUE, width=3.5, shape="spline"),
-            marker=dict(size=6, color=BLUE, line=dict(color="white", width=2)),
-            fill="tozeroy",
-            fillcolor=BLUE_LIGHT,
-            hovertemplate=(
-                "<b>%{x|%d %b %Y}</b><br>"
-                "Revenue: <b>₹%{y:,.0f}</b><br>"
-                "<extra></extra>"
-            ),
-        )
-        max_rev = df["revenue"].max() if not df.empty else 0
-        fig.update_layout(
-            xaxis_title="Date",
-            yaxis_title="Revenue (₹)",
-            yaxis=dict(range=[0, max_rev * 1.18]),
-            height=370,
-            **CHART_BG,
-            font=FONT,
-            margin=dict(l=40, r=30, t=10, b=50),
-            showlegend=False,
-            hoverlabel=HOVER_LABEL,
-            hovermode="x unified",
-        )
-        fig.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
-        fig.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+            df = get_revenue_trend_daily(revenue_period_start, revenue_period_end)
 
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            fig = px.line(df, x="date", y="revenue")
+            fig.update_traces(
+                mode="lines+markers",
+                line=dict(color=BLUE, width=3.5, shape="spline"),
+                marker=dict(size=6, color=BLUE, line=dict(color="white", width=2)),
+                fill="tozeroy",
+                fillcolor=BLUE_LIGHT,
+                hovertemplate=(
+                    "<b>%{x|%d %b %Y}</b><br>"
+                    "Revenue: <b>₹%{y:,.0f}</b><br>"
+                    "<extra></extra>"
+                ),
+            )
+            max_rev = df["revenue"].max() if not df.empty else 0
+            fig.update_layout(
+                xaxis_title="Date",
+                yaxis_title="Revenue (₹)",
+                yaxis=dict(range=[0, max_rev * 1.18]),
+                height=370,
+                **CHART_BG,
+                font=FONT,
+                margin=dict(l=40, r=30, t=10, b=50),
+                showlegend=False,
+                hoverlabel=HOVER_LABEL,
+                hovermode="x unified",
+            )
+            fig.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+            fig.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
 
-        if len(df) >= 2:
-            latest = df.iloc[-1]["revenue"]
-            previous = df.iloc[-2]["revenue"]
-            growth = round((latest - previous) / previous * 100, 1) if previous != 0 else 0
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-        st.markdown("</div>", unsafe_allow_html=True)
+            if len(df) >= 2:
+                latest = df.iloc[-1]["revenue"]
+                previous = df.iloc[-2]["revenue"]
+                growth = round((latest - previous) / previous * 100, 1) if previous != 0 else 0
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        else:
+            st.markdown(f"""
+            <div class="chart-card">
+                <div class="figure-title">Daily Revenue Trend — {revenue_period_a_label} vs {revenue_period_b_label} (pacing)</div>
+            
+            """, unsafe_allow_html=True)
+
+            pacing_a = get_revenue_pacing(revenue_period_start, revenue_period_end)
+            pacing_b = get_revenue_pacing(revenue_period_b_start, revenue_period_b_end)
+
+            day_a = len(pacing_a["daily"]) if not pacing_a["daily"].empty else 0
+
+            total_a = pacing_a["total"]
+            total_b = pacing_b["total"]
+
+            pacing_pct = round((total_a - total_b) / total_b * 100, 1) if total_b else None
+            pacing_color = "#059669" if (pacing_pct or 0) >= 0 else "#DC2626"
+            pacing_bg = "#ECFDF5" if (pacing_pct or 0) >= 0 else "#FEF2F2"
+
+            pcard1, pcard2, pcard3 = st.columns(3)
+            with pcard1:
+                st.markdown(
+                    f'<div style="background:white;border:1px solid #EAECF0;border-radius:12px;padding:14px 18px;">'
+                    f'<span style="font-size:12px;color:#6B7280;font-weight:600;">{revenue_period_a_label} (day {day_a})</span><br>'
+                    f'<span style="font-size:20px;font-weight:800;color:#0F172A;">₹{total_a:,.0f}</span><br>'
+                    f'<span style="font-size:11px;color:#6B7280;">Monthly billed: ₹{pacing_a["monthly_billed"]:,.0f}</span><br>'
+                    f'<span style="font-size:11px;color:#6B7280;">Yearly billed: ₹{pacing_a["yearly_billed"]:,.0f}</span>'
+                    f'</div>', unsafe_allow_html=True
+                )
+            with pcard2:
+                st.markdown(
+                    f'<div style="background:white;border:1px solid #EAECF0;border-radius:12px;padding:14px 18px;">'
+                    f'<span style="font-size:12px;color:#6B7280;font-weight:600;">{revenue_period_b_label}</span><br>'
+                    f'<span style="font-size:20px;font-weight:800;color:#0F172A;">₹{total_b:,.0f}</span><br>'
+                    f'<span style="font-size:11px;color:#6B7280;">Monthly billed: ₹{pacing_b["monthly_billed"]:,.0f}</span><br>'
+                    f'<span style="font-size:11px;color:#6B7280;">Yearly billed: ₹{pacing_b["yearly_billed"]:,.0f}</span>'
+                    f'</div>', unsafe_allow_html=True
+                )
+            with pcard3:
+                pacing_label = f"{pacing_pct:+.1f}% {'ahead' if (pacing_pct or 0) >= 0 else 'behind'}" if pacing_pct is not None else "N/A"
+                st.markdown(
+                    f'<div style="background:{pacing_bg};border:1px solid #EAECF0;border-radius:12px;padding:14px 18px;">'
+                    f'<span style="font-size:12px;color:{pacing_color};font-weight:600;">Pacing</span><br>'
+                    f'<span style="font-size:20px;font-weight:800;color:{pacing_color};">{pacing_label}</span>'
+                    f'</div>', unsafe_allow_html=True
+                )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            fig = go.Figure()
+            if not pacing_b["daily"].empty:
+                fig.add_trace(go.Scatter(
+                    x=pacing_b["daily"]["day_in_period"], y=pacing_b["daily"]["cumulative_revenue"],
+                    mode="lines", name=revenue_period_b_label,
+                    line=dict(color="#85B7EB", width=2, dash="dash"),
+                ))
+            if not pacing_a["daily"].empty:
+                fig.add_trace(go.Scatter(
+                    x=pacing_a["daily"]["day_in_period"], y=pacing_a["daily"]["cumulative_revenue"],
+                    mode="lines", name=revenue_period_a_label,
+                    line=dict(color=BLUE, width=2.5),
+                ))
+            fig.update_layout(
+                xaxis_title="Day of period",
+                yaxis_title="Cumulative Revenue (₹)",
+                height=340,
+                **CHART_BG,
+                font=FONT,
+                margin=dict(l=40, r=30, t=10, b=50),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hoverlabel=HOVER_LABEL,
+                hovermode="x unified",
+            )
+            fig.update_xaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+            fig.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
+
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+            max_day_a = pacing_a["daily"]["day_in_period"].max() if not pacing_a["daily"].empty else 0
+            max_day_b = pacing_b["daily"]["day_in_period"].max() if not pacing_b["daily"].empty else 0
+            if max_day_a != max_day_b:
+                st.caption("Note: the two periods aren't the same length, so one line will run longer than the other on this chart.")
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
         st.markdown("<br>", unsafe_allow_html=True)
 
 
@@ -1307,6 +1495,161 @@ if revenue_tab:
             """
             st.components.v1.html(component_html, height=height + 20, scrolling=False)
 
+        def render_interactive_revenue_bar_compare(pivot_a, pivot_b, period_a_label, period_b_label,
+                                                     div_id, segment_order, color_map, height=320,
+                                                     x_title="Revenue (\u20b9)"):
+            """
+            Grouped+stacked comparison version of render_interactive_revenue_bar.
+            pivot_a/pivot_b: DataFrames indexed by the SAME category set (already
+                             unioned + zero-filled by the caller), one column per segment.
+
+            Implementation note: an earlier version tried to achieve grouped+stacked
+            bars via Plotly's offsetgroup property combined with barmode='stack' --
+            this does NOT work as commonly assumed; barmode='stack' ignores
+            offsetgroup and merges everything sharing a y-category into one bar
+            regardless. The reliable approach used here instead: give each period
+            its own ROW on the y-axis (e.g. "Diamond Plan \u2014 Last Month" and
+            "Diamond Plan \u2014 Last Quarter" as two adjacent rows), each of which
+            is a completely normal, guaranteed-correct single-period stacked bar.
+            The period is encoded directly in the row label, so no opacity/color
+            trick is needed to tell them apart.
+
+            Note: unlike the all-time version, this doesn't show the unique/active/
+            inactive user hover breakdown -- doubling that detail across two periods
+            would make the hover unreadably cluttered, so it's intentionally dropped
+            here in favor of revenue + % of bar + period total only.
+            """
+            categories = [str(c) for c in pivot_a.index.tolist()]
+            segments = [s for s in segment_order if s in pivot_a.columns or s in pivot_b.columns]
+
+            series_a = {seg: (pivot_a[seg].astype(float).tolist() if seg in pivot_a.columns else [0.0] * len(categories)) for seg in segments}
+            series_b = {seg: (pivot_b[seg].astype(float).tolist() if seg in pivot_b.columns else [0.0] * len(categories)) for seg in segments}
+
+            # Interleave: [CatA-PeriodA, CatA-PeriodB, CatB-PeriodA, CatB-PeriodB, ...]
+            # so each category's two period-rows sit directly adjacent to each other.
+            row_labels = []
+            row_period = []  # 'a' or 'b', same length as row_labels
+            row_category_idx = []  # which original category index this row belongs to
+            for i, cat in enumerate(categories):
+                row_labels.append(f"{cat}  \u2022 {period_b_label}")
+                row_period.append("b")
+                row_category_idx.append(i)
+                row_labels.append(f"{cat}  \u2022 {period_a_label}")
+                row_period.append("a")
+                row_category_idx.append(i)
+
+            row_totals = []
+            for pk, ci in zip(row_period, row_category_idx):
+                series = series_a if pk == "a" else series_b
+                row_totals.append(sum(series[seg][ci] for seg in segments))
+
+            traces_js = []
+            for seg in segments:
+                color = color_map.get(seg, "#94A3B8")
+                x_vals = []
+                cd = []
+                for pk, ci, row_total in zip(row_period, row_category_idx, row_totals):
+                    series = series_a if pk == "a" else series_b
+                    val = series[seg][ci]
+                    x_vals.append(val)
+                    pct = round(val / row_total * 100, 1) if row_total > 0 else 0.0
+                    cd.append([val, row_total, pct])
+
+                hovertemplate = (
+                    "<b>%{y}</b><br>"
+                    f"{seg}: <b>\u20b9%{{customdata[0]:,.0f}}</b> (%{{customdata[2]}}% of bar)<br>"
+                    "Bar Total: <b>\u20b9%{customdata[1]:,.0f}</b><extra></extra>"
+                )
+                traces_js.append(f"""
+                {{
+                    y: rowLabels, x: {json.dumps(x_vals)}, name: {json.dumps(seg)},
+                    type: 'bar', orientation: 'h', marker: {{ color: {json.dumps(color)} }},
+                    customdata: {json.dumps(cd)},
+                    hovertemplate: {json.dumps(hovertemplate)}
+                }}""")
+
+            component_html = f"""
+            <div id="{div_id}" style="width:100%; height:{height}px;"></div>
+            <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+            <script>
+            (function() {{
+                var rowLabels = {json.dumps(row_labels)};
+                var rowTotals = {json.dumps(row_totals)};
+
+                var barTraces = [{','.join(traces_js)}];
+
+                var traceTotal = {{
+                    y: rowLabels, x: rowTotals,
+                    text: rowTotals.map(function(v) {{ return '\u20b9' + Math.round(v).toLocaleString('en-IN'); }}),
+                    mode: 'text', textposition: 'middle right',
+                    textfont: {{ size: 11, color: '#0F172A', family: 'Manrope' }},
+                    showlegend: false, hoverinfo: 'skip', type: 'scatter'
+                }};
+
+                var layout = {{
+                    height: {height},
+                    barmode: 'stack',
+                    margin: {{ l: 190, r: 150, t: 10, b: 40 }},
+                    plot_bgcolor: 'white', paper_bgcolor: 'white',
+                    font: {{ family: 'Manrope', color: '#1E293B', size: 12 }},
+                    xaxis: {{ title: {json.dumps(x_title)}, gridcolor: '#E5E7EB', color: '#1E293B',
+                              tickfont: {{ family: 'Manrope', size: 11 }},
+                              range: [0, Math.max.apply(null, rowTotals) * 1.22] }},
+                    yaxis: {{ color: '#1E293B', tickfont: {{ family: 'Manrope', size: 10.5 }} }},
+                    legend: {{
+                        orientation: 'v', yanchor: 'top', y: 1, xanchor: 'left', x: 1.0,
+                        font: {{ size: 12, color: '#0F172A', family: 'Manrope' }}
+                    }},
+                    hoverlabel: {{
+                        bgcolor: 'rgba(15,23,42,0.88)', bordercolor: 'rgba(37,99,235,0.6)',
+                        font: {{ family: 'Manrope', size: 12, color: '#F8FAFC' }}
+                    }}
+                }};
+
+                var config = {{ displayModeBar: false, responsive: true }};
+                var gd = document.getElementById('{div_id}');
+
+                function waitForStableWidth(el, cb, tries) {{
+                    tries = tries || 0;
+                    var w1 = el.offsetWidth;
+                    requestAnimationFrame(function() {{
+                        var w2 = el.offsetWidth;
+                        if ((w1 === w2 && w1 > 0) || tries > 40) {{
+                            cb();
+                        }} else {{
+                            waitForStableWidth(el, cb, tries + 1);
+                        }}
+                    }});
+                }}
+
+                waitForStableWidth(gd, function() {{
+                    Plotly.newPlot(gd, barTraces.concat([traceTotal]), layout, config);
+
+                    window.addEventListener('resize', function() {{ Plotly.Plots.resize(gd); }});
+
+                    var visible = barTraces.map(function() {{ return true; }});
+
+                    gd.on('plotly_legendclick', function(data) {{
+                        var idx = data.curveNumber;
+                        if (idx < barTraces.length) {{
+                            visible[idx] = !visible[idx];
+                            var newTotals = rowLabels.map(function(_, i) {{
+                                var sum = 0;
+                                barTraces.forEach(function(t, ti) {{ if (visible[ti]) sum += t.x[i]; }});
+                                return sum;
+                            }});
+                            var newText = newTotals.map(function(v) {{ return '\u20b9' + Math.round(v).toLocaleString('en-IN'); }});
+                            Plotly.restyle(gd, {{ x: [newTotals], text: [newText] }}, [barTraces.length]);
+                        }}
+                        return true;
+                    }});
+                }});
+            }})();
+            </script>
+            """
+            st.components.v1.html(component_html, height=height + 20, scrolling=False)
+
+
         
         # ---- Figure 2+3: Revenue by Plan & Partner ----
         c1, c2 = st.columns(2, gap="small")
@@ -1315,46 +1658,125 @@ if revenue_tab:
             anchor("revenue-by-plan")
             st.markdown(f"""
                    <div class="chart-card">
-                       <div class="figure-title">Revenue by Plan{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
+                       <div class="figure-title">Revenue by Plan{'' if revenue_period_a_label == 'All Time' else f' — {revenue_period_a_label} vs {revenue_period_b_label}'}</div>
                    """, unsafe_allow_html=True)
 
-            df_plan_cycle = get_plan_revenue_by_cycle(revenue_period_start, revenue_period_end)
-            if not df_plan_cycle.empty:
-                unwanted_plans = ["Custom SSO 5.0", "Silver Duplicate 1", "Diamond Plan Duplicate", "Gold Plan Duplicate"]
-                df_plan_clean = df_plan_cycle[~df_plan_cycle["plan_name"].isin(unwanted_plans)].copy()
+            unwanted_plans = ["Custom SSO 5.0", "Silver Duplicate 1", "Diamond Plan Duplicate", "Gold Plan Duplicate"]
 
-                pivot_plan = (
-                    df_plan_clean.groupby(["plan_name", "billing_cycle"])["revenue"].sum()
-                    .unstack(fill_value=0)
-                )
-                plan_order_by_total = pivot_plan.sum(axis=1).sort_values(ascending=True).index.tolist()
-                pivot_plan = pivot_plan.reindex(plan_order_by_total)
+            if revenue_period_a_label == "All Time":
+                df_plan_cycle = get_plan_revenue_by_cycle(revenue_period_start, revenue_period_end)
+                if not df_plan_cycle.empty:
+                    df_plan_clean = df_plan_cycle[~df_plan_cycle["plan_name"].isin(unwanted_plans)].copy()
 
-                pivot_plan_users = (
-                    df_plan_clean.set_index(["plan_name", "billing_cycle"])["unique_users"]
-                    .unstack(fill_value=0).reindex(plan_order_by_total)
-                )
-                pivot_plan_active = (
-                    df_plan_clean.set_index(["plan_name", "billing_cycle"])["active_users"]
-                    .unstack(fill_value=0).reindex(plan_order_by_total)
-                )
-                pivot_plan_inactive = (
-                    df_plan_clean.set_index(["plan_name", "billing_cycle"])["inactive_users"]
-                    .unstack(fill_value=0).reindex(plan_order_by_total)
-                )
+                    pivot_plan = (
+                        df_plan_clean.groupby(["plan_name", "billing_cycle"])["revenue"].sum()
+                        .unstack(fill_value=0)
+                    )
+                    plan_order_by_total = pivot_plan.sum(axis=1).sort_values(ascending=True).index.tolist()
+                    pivot_plan = pivot_plan.reindex(plan_order_by_total)
 
-                render_interactive_revenue_bar(
-                    pivot_plan,
-                    div_id="revByPlan",
-                    segment_order=["Annual", "Monthly"],
-                    color_map={"Annual": "#00FF00", "Monthly": "#0000FF"},
-                    height=320,
-                    users_pivot=pivot_plan_users,
-                    active_pivot=pivot_plan_active,
-                    inactive_pivot=pivot_plan_inactive,
-                )
+                    pivot_plan_users = (
+                        df_plan_clean.set_index(["plan_name", "billing_cycle"])["unique_users"]
+                        .unstack(fill_value=0).reindex(plan_order_by_total)
+                    )
+                    pivot_plan_active = (
+                        df_plan_clean.set_index(["plan_name", "billing_cycle"])["active_users"]
+                        .unstack(fill_value=0).reindex(plan_order_by_total)
+                    )
+                    pivot_plan_inactive = (
+                        df_plan_clean.set_index(["plan_name", "billing_cycle"])["inactive_users"]
+                        .unstack(fill_value=0).reindex(plan_order_by_total)
+                    )
+
+                    render_interactive_revenue_bar(
+                        pivot_plan,
+                        div_id="revByPlan",
+                        segment_order=["Annual", "Monthly"],
+                        color_map={"Annual": "#00FF00", "Monthly": "#0000FF"},
+                        height=320,
+                        users_pivot=pivot_plan_users,
+                        active_pivot=pivot_plan_active,
+                        inactive_pivot=pivot_plan_inactive,
+                    )
+                else:
+                    st.info("No plan revenue data available.")
             else:
-                st.info("No plan revenue data available.")
+                df_plan_cycle_a = get_plan_revenue_by_cycle(revenue_period_start, revenue_period_end)
+                df_plan_cycle_b = get_plan_revenue_by_cycle(revenue_period_b_start, revenue_period_b_end)
+
+                df_plan_a = df_plan_cycle_a[~df_plan_cycle_a["plan_name"].isin(unwanted_plans)].copy() if not df_plan_cycle_a.empty else df_plan_cycle_a
+                df_plan_b = df_plan_cycle_b[~df_plan_cycle_b["plan_name"].isin(unwanted_plans)].copy() if not df_plan_cycle_b.empty else df_plan_cycle_b
+
+                if (df_plan_a is not None and not df_plan_a.empty) or (df_plan_b is not None and not df_plan_b.empty):
+                    pivot_a = (
+                        df_plan_a.groupby(["plan_name", "billing_cycle"])["revenue"].sum().unstack(fill_value=0)
+                        if df_plan_a is not None and not df_plan_a.empty else pd.DataFrame()
+                    )
+                    pivot_b = (
+                        df_plan_b.groupby(["plan_name", "billing_cycle"])["revenue"].sum().unstack(fill_value=0)
+                        if df_plan_b is not None and not df_plan_b.empty else pd.DataFrame()
+                    )
+
+                    all_plans = sorted(set(pivot_a.index.tolist()) | set(pivot_b.index.tolist()))
+                    pivot_a = pivot_a.reindex(all_plans, fill_value=0)
+                    pivot_b = pivot_b.reindex(all_plans, fill_value=0)
+                    order_by_total = (pivot_a.sum(axis=1) + pivot_b.sum(axis=1)).sort_values(ascending=True).index.tolist()
+                    pivot_a = pivot_a.reindex(order_by_total, fill_value=0)
+                    pivot_b = pivot_b.reindex(order_by_total, fill_value=0)
+
+                    totals_a = pivot_a.sum(axis=1)
+                    totals_b = pivot_b.sum(axis=1)
+                    monthly_a = pivot_a.reindex(order_by_total).get("Monthly", pd.Series(0, index=order_by_total))
+                    annual_a = pivot_a.reindex(order_by_total).get("Annual", pd.Series(0, index=order_by_total))
+                    monthly_b = pivot_b.reindex(order_by_total).get("Monthly", pd.Series(0, index=order_by_total))
+                    annual_b = pivot_b.reindex(order_by_total).get("Annual", pd.Series(0, index=order_by_total))
+
+                    fig_plan_cmp = go.Figure()
+                    fig_plan_cmp.add_trace(go.Bar(
+                        y=order_by_total, x=totals_b.reindex(order_by_total), orientation="h",
+                        name=revenue_period_b_label, marker_color="#B5D4F4",
+                        customdata=list(zip(monthly_b, annual_b)),
+                        hovertemplate=(
+                            f"<b>%{{y}}</b> \u2014 {revenue_period_b_label}<br>"
+                            "Total: <b>\u20b9%{x:,.0f}</b><br>"
+                            "Monthly: <b>\u20b9%{customdata[0]:,.0f}</b><br>"
+                            "Annual: <b>\u20b9%{customdata[1]:,.0f}</b><extra></extra>"
+                        ),
+                    ))
+                    fig_plan_cmp.add_trace(go.Bar(
+                        y=order_by_total, x=totals_a.reindex(order_by_total), orientation="h",
+                        name=revenue_period_a_label, marker_color=BLUE,
+                        customdata=list(zip(monthly_a, annual_a)),
+                        hovertemplate=(
+                            f"<b>%{{y}}</b> \u2014 {revenue_period_a_label}<br>"
+                            "Total: <b>\u20b9%{x:,.0f}</b><br>"
+                            "Monthly: <b>\u20b9%{customdata[0]:,.0f}</b><br>"
+                            "Annual: <b>\u20b9%{customdata[1]:,.0f}</b><extra></extra>"
+                        ),
+                    ))
+                    fig_plan_cmp.update_layout(
+                        barmode="group", height=320, xaxis_title="Revenue (\u20b9)", yaxis_title="",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        margin=dict(l=12, r=20, t=40, b=40),
+                        hoverlabel=HOVER_LABEL,
+                        hovermode="closest",
+                    )
+                    st.plotly_chart(fig_plan_cmp, use_container_width=True, config={"displayModeBar": False})
+
+                    with st.expander("Reconciliation table"):
+                        recon_plan = pd.DataFrame({
+                            "Plan": order_by_total,
+                            revenue_period_a_label: totals_a.reindex(order_by_total).round(0).astype(int).values,
+                            revenue_period_b_label: totals_b.reindex(order_by_total).round(0).astype(int).values,
+                        })
+                        recon_plan["Change"] = recon_plan.apply(
+                            lambda r: "\u2014" if r[revenue_period_b_label] == 0 else f"{((r[revenue_period_a_label] - r[revenue_period_b_label]) / r[revenue_period_b_label] * 100):+.1f}%",
+                            axis=1,
+                        )
+                        st.dataframe(recon_plan.sort_values(revenue_period_a_label, ascending=False), hide_index=True, use_container_width=True)
+                        st.caption("Hover over a bar to see its Monthly/Annual breakdown.")
+                else:
+                    st.info("No plan revenue data available for either selected period.")
 
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1363,111 +1785,212 @@ if revenue_tab:
             with st.container():
                 st.markdown(f"""
                    <div class="chart-card">
-                       <div class="figure-title">Revenue by Partner{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
+                       <div class="figure-title">Revenue by Partner{'' if revenue_period_a_label == 'All Time' else f' — {revenue_period_a_label} vs {revenue_period_b_label}'}</div>
                    """, unsafe_allow_html=True)
-
-                df_partner_plan = get_partner_revenue_by_plan(revenue_period_start, revenue_period_end)
 
                 allowed_plans = ["Diamond Plan", "Platinum Plan", "Silver Plan",
                                  "Trial Plan", "Gold Plan", "Content Top up"]
+                excluded_partners = ["Custom SSO", "Testing SSO", "Test Partner", "Custom SSO 5.0"]
+                plan_color_map = {
+                    "Trial Plan": "#D1D5DB",
+                    "Silver Plan": "#9CA3AF",
+                    "Gold Plan": "#F59E0B",
+                    "Platinum Plan": "#2563EB",
+                    "Diamond Plan": "#6366F1",
+                    "Content Top up": "#10B981",
+                }
 
-                if not df_partner_plan.empty:
-                    df_partner_plan = df_partner_plan[df_partner_plan["plan_name"].isin(allowed_plans)].copy()
+                def _clean_partner_df(df):
+                    if df.empty:
+                        return df
+                    df = df[df["plan_name"].isin(allowed_plans)].copy()
+                    df = df[~df["sso_partner_name"].astype(str).str.contains(
+                        "|".join(excluded_partners), case=False, na=False
+                    )].copy()
+                    return df
 
-                    excluded_partners = ["Custom SSO", "Testing SSO", "Test Partner", "Custom SSO 5.0"]
-                    df_partner_plan = df_partner_plan[
-                        ~df_partner_plan["sso_partner_name"].astype(str).str.contains(
-                            "|".join(excluded_partners), case=False, na=False
+                if revenue_period_a_label == "All Time":
+                    df_partner_plan = get_partner_revenue_by_plan(revenue_period_start, revenue_period_end)
+                    df_partner_plan = _clean_partner_df(df_partner_plan)
+
+                    if not df_partner_plan.empty:
+                        pivot_partner = (
+                            df_partner_plan.groupby(["sso_partner_name", "plan_name"])["revenue"].sum()
+                            .unstack(fill_value=0)
                         )
-                    ].copy()
+                        partner_order_by_total = pivot_partner.sum(axis=1).sort_values(ascending=True).index.tolist()
+                        pivot_partner = pivot_partner.reindex(partner_order_by_total)
 
-                if not df_partner_plan.empty:
-                    pivot_partner = (
-                        df_partner_plan.groupby(["sso_partner_name", "plan_name"])["revenue"].sum()
-                        .unstack(fill_value=0)
-                    )
-                    partner_order_by_total = pivot_partner.sum(axis=1).sort_values(ascending=True).index.tolist()
-                    pivot_partner = pivot_partner.reindex(partner_order_by_total)
-
-                    plan_color_map = {
-                        "Trial Plan": "#D1D5DB",
-                        "Silver Plan": "#9CA3AF",
-                        "Gold Plan": "#F59E0B",
-                        "Platinum Plan": "#2563EB",
-                        "Diamond Plan": "#6366F1",
-                        "Content Top up": "#10B981",
-                    }
-
-                    render_interactive_revenue_bar(
-                        pivot_partner,
-                        div_id="revByPartner",
-                        segment_order=allowed_plans,
-                        color_map=plan_color_map,
-                        height=max(320, len(partner_order_by_total) * 70),
-                    )
+                        render_interactive_revenue_bar(
+                            pivot_partner,
+                            div_id="revByPartner",
+                            segment_order=allowed_plans,
+                            color_map=plan_color_map,
+                            height=max(320, len(partner_order_by_total) * 70),
+                        )
+                    else:
+                        st.info("No partner revenue data available.")
                 else:
-                    st.info("No partner revenue data available.")
+                    df_partner_a = _clean_partner_df(get_partner_revenue_by_plan(revenue_period_start, revenue_period_end))
+                    df_partner_b = _clean_partner_df(get_partner_revenue_by_plan(revenue_period_b_start, revenue_period_b_end))
+
+                    if (not df_partner_a.empty) or (not df_partner_b.empty):
+                        pivot_pa = (
+                            df_partner_a.groupby(["sso_partner_name", "plan_name"])["revenue"].sum().unstack(fill_value=0)
+                            if not df_partner_a.empty else pd.DataFrame()
+                        )
+                        pivot_pb = (
+                            df_partner_b.groupby(["sso_partner_name", "plan_name"])["revenue"].sum().unstack(fill_value=0)
+                            if not df_partner_b.empty else pd.DataFrame()
+                        )
+
+                        all_partners = sorted(set(pivot_pa.index.tolist()) | set(pivot_pb.index.tolist()))
+                        pivot_pa = pivot_pa.reindex(all_partners, fill_value=0)
+                        pivot_pb = pivot_pb.reindex(all_partners, fill_value=0)
+                        partner_order = (pivot_pa.sum(axis=1) + pivot_pb.sum(axis=1)).sort_values(ascending=True).index.tolist()
+                        pivot_pa = pivot_pa.reindex(partner_order, fill_value=0)
+                        pivot_pb = pivot_pb.reindex(partner_order, fill_value=0)
+
+                        totals_pa = pivot_pa.sum(axis=1)
+                        totals_pb = pivot_pb.sum(axis=1)
+
+                        def _plan_breakdown_text(pivot_row):
+                            lines = []
+                            for plan in allowed_plans:
+                                val = pivot_row.get(plan, 0)
+                                if val and val > 0:
+                                    lines.append(f"{plan}: \u20b9{val:,.0f}")
+                            return "<br>".join(lines) if lines else "No plan-level revenue"
+
+                        breakdown_pa = [_plan_breakdown_text(pivot_pa.loc[p]) for p in partner_order]
+                        breakdown_pb = [_plan_breakdown_text(pivot_pb.loc[p]) for p in partner_order]
+
+                        fig_partner_cmp = go.Figure()
+                        fig_partner_cmp.add_trace(go.Bar(
+                            y=partner_order, x=totals_pb.reindex(partner_order), orientation="h",
+                            name=revenue_period_b_label, marker_color="#B5D4F4",
+                            customdata=breakdown_pb,
+                            hovertemplate=(
+                                f"<b>%{{y}}</b> \u2014 {revenue_period_b_label}<br>"
+                                "Total: <b>\u20b9%{x:,.0f}</b><br><br>"
+                                "%{customdata}<extra></extra>"
+                            ),
+                        ))
+                        fig_partner_cmp.add_trace(go.Bar(
+                            y=partner_order, x=totals_pa.reindex(partner_order), orientation="h",
+                            name=revenue_period_a_label, marker_color=BLUE,
+                            customdata=breakdown_pa,
+                            hovertemplate=(
+                                f"<b>%{{y}}</b> \u2014 {revenue_period_a_label}<br>"
+                                "Total: <b>\u20b9%{x:,.0f}</b><br><br>"
+                                "%{customdata}<extra></extra>"
+                            ),
+                        ))
+                        fig_partner_cmp.update_layout(
+                            barmode="group", height=max(320, len(partner_order) * 60),
+                            xaxis_title="Revenue (\u20b9)", yaxis_title="",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                            margin=dict(l=12, r=20, t=40, b=40),
+                            hoverlabel=HOVER_LABEL,
+                            hovermode="closest",
+                        )
+                        st.plotly_chart(fig_partner_cmp, use_container_width=True, config={"displayModeBar": False})
+
+                        with st.expander("Reconciliation table"):
+                            recon_partner = pd.DataFrame({
+                                "Partner": partner_order,
+                                revenue_period_a_label: totals_pa.reindex(partner_order).round(0).astype(int).values,
+                                revenue_period_b_label: totals_pb.reindex(partner_order).round(0).astype(int).values,
+                            })
+                            recon_partner["Change"] = recon_partner.apply(
+                                lambda r: "\u2014" if r[revenue_period_b_label] == 0 else f"{((r[revenue_period_a_label] - r[revenue_period_b_label]) / r[revenue_period_b_label] * 100):+.1f}%",
+                                axis=1,
+                            )
+                            st.dataframe(recon_partner.sort_values(revenue_period_a_label, ascending=False), hide_index=True, use_container_width=True)
+                            st.caption("Hover over a bar to see its plan-wise breakdown (Diamond/Platinum/Silver/Trial/Gold/Content Top up).")
+                    else:
+                        st.info("No partner revenue data available for either selected period.")
 
                 st.markdown("</div>", unsafe_allow_html=True)
         # ============================================================
-        # Monthly → Yearly Plan Conversions
+        # Plan Conversions
         # ============================================================
         debug_conversion_counts()
 
         anchor("monthly-yearly-conversions")
         st.markdown(f"""
         <div class="chart-card">
-            <div class="figure-title">Monthly → Yearly Plan Conversions{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
+            <div class="figure-title">Plan Conversions{'' if revenue_period_label == 'All Time' else f' — {revenue_period_label}'}</div>
         
         """, unsafe_allow_html=True)
 
-        df_conv = get_monthly_to_yearly_conversions(revenue_period_start, revenue_period_end)
+        bd = pc["breakdown"]
+        pc_b = get_plan_conversions(revenue_period_b_start, revenue_period_b_end) if revenue_period_a_label != "All Time" else None
+        bd_b = pc_b["breakdown"] if pc_b else None
+        pc_cmp_suffix = f"vs {revenue_period_b_label}" if pc_b else None
 
-        if not df_conv.empty:
-            total_users = len(df_conv)
-            total_revenue = df_conv["amount_paid"].sum() if "amount_paid" in df_conv.columns else 0
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Upgrade Users", f"{pc['upgrade_users']:,}",
+                  _trend(pc['upgrade_users'], pc_b['upgrade_users'], pc_cmp_suffix) if pc_b else None)
+        k2.metric("Downgrade Users", f"{pc['downgrade_users']:,}",
+                  _trend(pc['downgrade_users'], pc_b['downgrade_users'], pc_cmp_suffix) if pc_b else None)
+        k3.metric("Conversion Revenue", f"₹ {pc['conversion_revenue']:,.0f}",
+                  _trend(pc['conversion_revenue'], pc_b['conversion_revenue'], pc_cmp_suffix) if pc_b else None)
+        k4.metric("Lost to Downgrade", f"₹ {pc['revenue_lost_to_downgrade']:,.0f}",
+                  _trend(pc['revenue_lost_to_downgrade'], pc_b['revenue_lost_to_downgrade'], pc_cmp_suffix) if pc_b else None)
 
-            m1, m2 = st.columns(2)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("<p style='font-size:13px;color:#6B7280;margin-bottom:8px;'>Breakdown by transition type</p>", unsafe_allow_html=True)
 
-            m1.metric("Upgraded Users", f"{total_users:,}")
-            m2.metric("Conversion Revenue", f"₹ {total_revenue:,.0f}")
+        def _sub_dist_line(sub_distribution):
+            if not sub_distribution:
+                return ""
+            parts = " &middot; ".join(f"{k}: {v}" for k, v in sub_distribution.items())
+            return f'<div style="font-size:11px;color:#9CA3AF;margin-top:8px;padding-top:8px;border-top:1px solid #F1F5F9;">{parts}</div>'
 
-            st.markdown("<br>", unsafe_allow_html=True)
+        def _card_delta_line(current, previous, suffix):
+            if previous is None:
+                return ""
+            trend = _trend(current, previous, suffix)
+            if not trend:
+                return ""
+            color = "#059669" if trend.startswith("+") else "#DC2626"
+            return f'<div style="font-size:10px;color:{color};font-weight:700;margin-top:2px;">{trend}</div>'
 
-            # ---- Pattern breakdown banner ----
-            if "pattern" in df_conv.columns:
-                pattern_counts = df_conv["pattern"].value_counts().reset_index()
-                pattern_counts.columns = ["pattern", "count"]
-                pattern_counts = pattern_counts.sort_values("count", ascending=False)
+        bcols = st.columns(5)
+        bucket_labels = ["Monthly to Yearly", "Yearly to Monthly", "Top Up", "Switch Up", "Switch Down"]
+        for col, label in zip(bcols, bucket_labels):
+            entry = bd[label]
+            entry_b = bd_b[label] if bd_b else None
+            sub_html = _sub_dist_line(entry.get("sub_distribution")) if "sub_distribution" in entry else ""
+            count_delta = _card_delta_line(entry['count'], entry_b['count'] if entry_b else None, pc_cmp_suffix)
+            users_delta = _card_delta_line(entry['unique_users'], entry_b['unique_users'] if entry_b else None, pc_cmp_suffix)
 
-                pattern_items = ""
-                for _, row in pattern_counts.iterrows():
-                    pattern_items += f"""
-                    <div style="display:flex;flex-direction:column;gap:3px;padding:0 22px;border-left:1px solid #E5E7EB;flex:1;min-width:160px;">
-                        <span style="font-size:10px;color:#9CA3AF;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;">{row['pattern']}</span>
-                        <span style="font-size:19px;font-weight:800;color:#0F172A;letter-spacing:-0.5px;">{row['count']:,}</span>
-                    
-                    </div>"""
+            card_html = (
+                '<div style="background:white;border:1px solid #EAECF0;border-radius:12px;padding:14px 16px;height:100%;">'
+                f'<div style="font-size:12px;font-weight:700;color:#374151;margin-bottom:8px;">{label}</div>'
+                f'<div style="font-size:20px;font-weight:800;color:#0F172A;">{entry["count"]:,} <span style="font-size:11px;font-weight:500;color:#6B7280;">events</span></div>'
+                f'{count_delta}'
+                f'<div style="font-size:11px;color:#6B7280;margin-top:4px;">{entry["unique_users"]:,} unique users</div>'
+                f'{users_delta}'
+                f'{sub_html}'
+                '</div>'
+            )
+            with col:
+                st.markdown(card_html, unsafe_allow_html=True)
 
-                st.components.v1.html(f"""
-                <div style="font-family:'Manrope',sans-serif;background:white;border:1px solid #EAECF0;
-                            border-radius:12px;padding:18px 24px;display:flex;align-items:center;gap:0;flex-wrap:wrap;">
-                    <div style="display:flex;flex-direction:column;gap:3px;padding-right:22px;min-width:130px;flex-shrink:0;">
-                        <span style="font-size:10px;color:#9CA3AF;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;">Conversion Patterns</span>
-                        <span style="font-size:12px;color:#6B7280;margin-top:2px;font-weight:500;">By transition type</span>
-                    </div>
-                    {pattern_items}
-                </div>
-                """, height=100 + (20 if len(pattern_counts) > 4 else 0))
+        st.markdown("<br>", unsafe_allow_html=True)
 
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            styled_df = df_conv.copy()
-            if "conversion_date" in styled_df.columns:
-                styled_df["conversion_date"] = pd.to_datetime(styled_df["conversion_date"]).dt.strftime("%Y-%m-%d %H:%M:%S")
-
-            if "amount_paid" in styled_df.columns:
-                styled_df["amount_paid"] = styled_df["amount_paid"].astype(int)
+        df_events = pc["events"]
+        if not df_events.empty:
+            styled_df = df_events.copy()
+            styled_df["amount_paid"] = styled_df["amount_paid"].fillna(0).astype(int)
+            styled_df["prev_amount"] = styled_df["prev_amount"].fillna(0).astype(int)
+            styled_df = styled_df.rename(columns={
+                "user_id": "User ID", "event_type": "Type", "sub_type": "Cycle Change",
+                "previous_plan": "Previous Plan", "current_plan": "Current Plan",
+                "amount_paid": "Amount Paid", "prev_amount": "Previous Amount", "date": "Date",
+            })
 
             light_table = styled_df.style.set_properties(**{
                 'background-color': 'white',
@@ -1497,6 +2020,8 @@ if revenue_tab:
                 use_container_width=True,
                 hide_index=True,
             )
+        else:
+            st.info("No plan conversion events in this period.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1505,81 +2030,186 @@ if revenue_tab:
 # ═══════════════════════════════════════════════════════
 if subscription_tab:
     with subscription_tab:
-        def _resolve_subscription_period(period_label):
-            """Converts a period label into (start_date, end_date) as date objects.
-            Returns (None, None) for 'All Time' — meaning no date filtering at all."""
+        SUBSCRIPTION_COMPARISON_OPTIONS = ["This Month", "Last Month", "This Quarter", "Last Quarter", "This Year", "Last Year", "All Time"]
+
+        def _resolve_subscription_comparison_period(label):
+            """Resolves any of the comparison-dropdown options into (start_date, end_date).
+            'All Time' returns (None, None). 'This Year' = financial-year-to-date
+            (Apr 1 of the current FY through today) and 'Last Year' = the full
+            previous financial year (Apr 1 - Mar 31) — per company convention,
+            not the calendar year. Uses dd.get_financial_year_bounds() so this
+            always agrees with Revenue and Product Usage."""
             today = date.today()
-            if period_label == "This Month":
-                start = today.replace(day=1)
-                end = today
-            elif period_label == "Last Month":
-                first_of_this_month = today.replace(day=1)
-                end = first_of_this_month - timedelta(days=1)
-                start = end.replace(day=1)
-            elif period_label == "This Year":
-                start = today.replace(month=1, day=1)
-                end = today
+            if label == "This Month":
+                return today.replace(day=1), today
+            elif label == "Last Month":
+                end = today.replace(day=1) - timedelta(days=1)
+                return end.replace(day=1), end
+            elif label == "This Quarter":
+                q_start_month = ((today.month - 1) // 3) * 3 + 1
+                return today.replace(month=q_start_month, day=1), today
+            elif label == "Last Quarter":
+                q_start_month = ((today.month - 1) // 3) * 3 + 1
+                this_q_start = today.replace(month=q_start_month, day=1)
+                last_q_end = this_q_start - timedelta(days=1)
+                last_q_start_month = ((last_q_end.month - 1) // 3) * 3 + 1
+                return last_q_end.replace(month=last_q_start_month, day=1), last_q_end
+            elif label == "This Year":
+                fy_start, _ = dd.get_financial_year_bounds(today, years_back=0)
+                return fy_start, today
+            elif label == "Last Year":
+                return dd.get_financial_year_bounds(today, years_back=1)
             else:  # "All Time"
-                start, end = None, None
-            return start, end
+                return None, None
 
         anchor("subscription-overview")
-        sub_header_left, sub_header_right = st.columns([3, 1])
+        sub_header_left, sub_header_right = st.columns([2.4, 3])
         with sub_header_left:
             st.markdown("<div class='section-header'>Subscription Overview</div>", unsafe_allow_html=True)
         with sub_header_right:
-            subscription_period_label = st.selectbox(
-                "Period", ["This Month", "Last Month", "This Year", "All Time"],
-                index=3, key="subscription_period_filter", label_visibility="collapsed",
-            )
-        subscription_period_start, subscription_period_end = _resolve_subscription_period(subscription_period_label)
+            sub_cmp_col_a, sub_cmp_col_vs, sub_cmp_col_b = st.columns([2, 0.4, 2])
+            with sub_cmp_col_a:
+                subscription_period_a_label = st.selectbox(
+                    "Compare", SUBSCRIPTION_COMPARISON_OPTIONS, index=SUBSCRIPTION_COMPARISON_OPTIONS.index("All Time"),
+                    key="subscription_period_a", label_visibility="collapsed",
+                )
+            with sub_cmp_col_vs:
+                st.markdown("<div style='text-align:center; padding-top:8px; color:#6B7280;'>vs</div>", unsafe_allow_html=True)
+            with sub_cmp_col_b:
+                subscription_period_b_locked = subscription_period_a_label == "All Time"
+                subscription_period_b_options = [opt for opt in SUBSCRIPTION_COMPARISON_OPTIONS if opt != subscription_period_a_label]
+                if st.session_state.get("subscription_period_b") not in subscription_period_b_options:
+                    st.session_state["subscription_period_b"] = subscription_period_b_options[0]
+                subscription_period_b_label = st.selectbox(
+                    "vs", subscription_period_b_options,
+                    key="subscription_period_b", label_visibility="collapsed",
+                    disabled=subscription_period_b_locked,
+                    help="Pick a period on the left other than All Time to unlock this." if subscription_period_b_locked else None,
+                )
+        subscription_period_b_start, subscription_period_b_end = _resolve_subscription_comparison_period(subscription_period_b_label)
+
+        # Alias to Period A so every existing section below (not yet migrated to full
+        # comparison) keeps working exactly as before, unaffected by this change.
+        subscription_period_label = subscription_period_a_label
+        subscription_period_start, subscription_period_end = _resolve_subscription_comparison_period(subscription_period_a_label)
         subscription_period_suffix = "" if subscription_period_label == "All Time" else f" — {subscription_period_label}"
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ---- KPI Row ----
         c1, c2, c3, c4 = st.columns(4)
 
+        def _trend(current, previous, suffix="vs last month", small_base_threshold=10):
+            """Returns a signed relative-% delta string for st.metric, or None if previous
+            is missing/zero. If previous is below small_base_threshold, returns the raw
+            count change instead of a wild percentage (e.g. 1 -> 39 misleadingly reads
+            as +3800%). Same helper as the Revenue tab, duplicated locally so this tab
+            doesn't depend on Revenue tab's code having run first (role-based tab
+            visibility means Revenue may not render at all for some users)."""
+            if current is None or previous is None:
+                return None
+            if previous == 0:
+                return None
+            if previous < small_base_threshold:
+                diff = current - previous
+                return f"{diff:+,.0f} {suffix}"
+            pct = round((current - previous) / previous * 100, 1)
+            return f"{pct:+.1f}% {suffix}"
+
+        def _card_delta_line(current, previous, suffix):
+            if previous is None:
+                return ""
+            trend = _trend(current, previous, suffix)
+            if not trend:
+                return ""
+            color = "#059669" if trend.startswith("+") else "#DC2626"
+            return f'<div style="font-size:10px;color:{color};font-weight:700;margin-top:2px;">{trend}</div>'
+
+        def _count_delta_line(current, previous, suffix):
+            """Like _card_delta_line, but always shows the raw count change
+            (e.g. '+4 vs Last Month') instead of a percentage — used for the
+            Renewed Users card since these are small headcounts, not rates."""
+            if previous is None:
+                return ""
+            diff = current - previous
+            if diff == 0:
+                return ""
+            trend = f"{diff:+,.0f} {suffix}" if suffix else f"{diff:+,.0f}"
+            color = "#059669" if diff > 0 else "#DC2626"
+            return f'<div style="font-size:10px;color:{color};font-weight:700;margin-top:2px;">{trend}</div>'
+
         sub_user_kpis = get_user_kpis(subscription_period_start, subscription_period_end)
         sub_renewal_kpis = get_renewal_kpis(subscription_period_start, subscription_period_end)
 
+        # Period B comparison — only meaningful once Period A is off "All Time"
+        # (mirrors the Revenue tab's pc_b pattern; Period B is locked/hidden otherwise).
+        sub_cmp_suffix = f"vs {subscription_period_b_label}" if subscription_period_a_label != "All Time" else None
+        if sub_cmp_suffix:
+            sub_user_kpis_b = get_user_kpis(subscription_period_b_start, subscription_period_b_end)
+            sub_renewal_kpis_b = get_renewal_kpis(subscription_period_b_start, subscription_period_b_end)
+        else:
+            sub_user_kpis_b = None
+            sub_renewal_kpis_b = None
+
         c1_label = "Total Users" if subscription_period_label == "All Time" else "New Users"
-        c1.metric(c1_label, f"{sub_user_kpis['total_users']:,}")
+        c1.metric(
+            c1_label, f"{sub_user_kpis['total_users']:,}",
+            _trend(sub_user_kpis["total_users"], sub_user_kpis_b["total_users"], sub_cmp_suffix) if sub_user_kpis_b else None
+        )
 
         c2.metric(
             f"Premium Conversion{subscription_period_suffix}",
             f"{sub_user_kpis['premium_conversion_rate']}%",
+            _trend(sub_user_kpis["premium_conversion_rate"], sub_user_kpis_b["premium_conversion_rate"], sub_cmp_suffix) if sub_user_kpis_b else None,
             help="Percentage of the selected user cohort who have EVER converted to a premium plan (Silver/Gold/Platinum/Diamond), at any point — not just within this window." if subscription_period_label != "All Time" else "Percentage of total users who have converted to a premium plan."
         )
         c3.metric(
             f"Renewal Rate{subscription_period_suffix}",
             f"{sub_renewal_kpis['renewal_rate']}%",
+            _trend(sub_renewal_kpis["renewal_rate"], sub_renewal_kpis_b["renewal_rate"], sub_cmp_suffix) if sub_renewal_kpis_b else None,
             help="Percentage of subscribers who returned for another billing cycle." + ("" if subscription_period_label == "All Time" else f" Scoped to invoices within {subscription_period_label}.")
         )
 
         renewed_split = get_renewed_users_by_cycle(subscription_period_start, subscription_period_end)
+        renewed_split_b = get_renewed_users_by_cycle(subscription_period_b_start, subscription_period_b_end) if sub_cmp_suffix else None
 
+        renewed_users_delta = _count_delta_line(
+            sub_renewal_kpis["renewed_users"],
+            sub_renewal_kpis_b["renewed_users"] if sub_renewal_kpis_b else None,
+            sub_cmp_suffix,
+        )
+        monthly_delta = _count_delta_line(
+            renewed_split["monthly_renewed"],
+            renewed_split_b["monthly_renewed"] if renewed_split_b else None,
+            sub_cmp_suffix,
+        )
+        yearly_delta = _count_delta_line(
+            renewed_split["yearly_renewed"],
+            renewed_split_b["yearly_renewed"] if renewed_split_b else None,
+            sub_cmp_suffix,
+        )
+
+        c4_html = (
+            '<div data-testid="stMetric" style="padding:16px 18px 14px 18px;">'
+            f'<div style="color:#6B7280; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase;">Renewed Users{subscription_period_suffix}</div>'
+            f'<div style="color:#0F172A; font-weight:800; font-size:26px; letter-spacing:-0.5px; margin-top:4px;">{sub_renewal_kpis["renewed_users"]:,}</div>'
+            f'{renewed_users_delta}'
+            '<div style="display:flex; gap:14px; margin-top:10px; padding-top:10px; border-top:1px solid #F1F5F9;">'
+            '<div style="flex:1;">'
+            '<span style="font-size:9px; font-weight:700; color:#3B82F6; text-transform:uppercase; letter-spacing:0.04em;">Monthly</span><br>'
+            f'<span style="font-size:15px; font-weight:800; color:#0F172A;">{renewed_split["monthly_renewed"]:,}</span>'
+            f'{monthly_delta}'
+            '</div>'
+            '<div style="width:1px; background:#E5E7EB;"></div>'
+            '<div style="flex:1; padding-left:4px;">'
+            '<span style="font-size:9px; font-weight:700; color:#1D4ED8; text-transform:uppercase; letter-spacing:0.04em;">Annual</span><br>'
+            f'<span style="font-size:15px; font-weight:800; color:#0F172A;">{renewed_split["yearly_renewed"]:,}</span>'
+            f'{yearly_delta}'
+            '</div>'
+            '</div>'
+            '</div>'
+        )
         with c4:
-            st.markdown(f"""
-                <div data-testid="stMetric" style="padding:16px 18px 14px 18px;">
-                    <div style="color:#6B7280; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase;">
-                        Renewed Users{subscription_period_suffix}
-                    </div>
-                    <div style="color:#0F172A; font-weight:800; font-size:26px; letter-spacing:-0.5px; margin-top:4px;">
-                        {sub_renewal_kpis['renewed_users']:,}
-                    </div>
-                    <div style="display:flex; gap:14px; margin-top:10px; padding-top:10px; border-top:1px solid #F1F5F9;">
-                        <div style="flex:1;">
-                            <span style="font-size:9px; font-weight:700; color:#3B82F6; text-transform:uppercase; letter-spacing:0.04em;">Monthly</span><br>
-                            <span style="font-size:15px; font-weight:800; color:#0F172A;">{renewed_split['monthly_renewed']:,}</span>
-                        </div>
-                        <div style="width:1px; background:#E5E7EB;"></div>
-                        <div style="flex:1; padding-left:4px;">
-                            <span style="font-size:9px; font-weight:700; color:#1D4ED8; text-transform:uppercase; letter-spacing:0.04em;">Annual</span><br>
-                            <span style="font-size:15px; font-weight:800; color:#0F172A;">{renewed_split['yearly_renewed']:,}</span>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+            st.markdown(c4_html, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1650,6 +2280,58 @@ if subscription_tab:
                 else:
                     rev_map[plan]["y_rev"] = int(row["amount_paid"])
 
+            # Period B comparison — only when Period A is off "All Time" (same
+            # gating as the KPI row above). Re-runs the identical tier/cycle
+            # aggregation scoped to Period B's dates instead.
+            tiers_data_b = None
+            rev_map_b = None
+            df_inv_b_dedup = pd.DataFrame()
+            if sub_cmp_suffix:
+                df_inv_b = dd._df("invoices")
+                if not df_inv_b.empty:
+                    df_inv_b = df_inv_b[df_inv_b["billed_plan_name"].isin(tier_explorer_plans)].copy()
+                    df_inv_b["billing_period_start_date"] = pd.to_datetime(df_inv_b["billing_period_start_date"])
+                    df_inv_b["billing_period_end_date"] = pd.to_datetime(df_inv_b["billing_period_end_date"])
+
+                    if subscription_period_b_start is not None:
+                        df_inv_b = df_inv_b[df_inv_b["billing_period_start_date"].dt.date >= subscription_period_b_start]
+                    if subscription_period_b_end is not None:
+                        df_inv_b = df_inv_b[df_inv_b["billing_period_start_date"].dt.date <= subscription_period_b_end]
+
+                    df_inv_b["cycle"] = np.where(
+                        (df_inv_b["billing_period_end_date"] - df_inv_b["billing_period_start_date"]).dt.days >= 300,
+                        "Annual", "Monthly"
+                    )
+
+                    df_inv_b_dedup = df_inv_b.sort_values("billing_period_start_date").drop_duplicates(
+                        subset=["user_id"], keep="last"
+                    )
+
+                    tiers_data_b = {p: {"m_users": 0, "y_users": 0} for p in tier_explorer_plans}
+                    summary_b = df_inv_b_dedup.groupby(["billed_plan_name", "cycle"]).agg(
+                        unique_subs=("user_id", "nunique")
+                    ).reset_index()
+                    for _, row in summary_b.iterrows():
+                        plan = row["billed_plan_name"]
+                        if row["cycle"] == "Monthly":
+                            tiers_data_b[plan]["m_users"] = int(row["unique_subs"])
+                        else:
+                            tiers_data_b[plan]["y_users"] = int(row["unique_subs"])
+
+                    rev_by_cycle_b = df_inv_b.groupby(["billed_plan_name", "cycle"])["amount_paid"].sum().reset_index()
+                    rev_map_b = {}
+                    for _, row in rev_by_cycle_b.iterrows():
+                        plan = row["billed_plan_name"]
+                        if plan not in rev_map_b:
+                            rev_map_b[plan] = {"m_rev": 0, "y_rev": 0}
+                        if row["cycle"] == "Monthly":
+                            rev_map_b[plan]["m_rev"] = int(row["amount_paid"])
+                        else:
+                            rev_map_b[plan]["y_rev"] = int(row["amount_paid"])
+                else:
+                    tiers_data_b = {p: {"m_users": 0, "y_users": 0} for p in tier_explorer_plans}
+                    rev_map_b = {}
+
             card_cols = st.columns(5, gap="medium")
 
             for idx, (tier_name, metrics) in enumerate(tiers_data.items()):
@@ -1657,6 +2339,16 @@ if subscription_tab:
                     total_allocated = metrics["m_users"] + metrics["y_users"]
                     m_rev = rev_map.get(tier_name, {}).get("m_rev", 0)
                     y_rev = rev_map.get(tier_name, {}).get("y_rev", 0)
+
+                    m_users_b = tiers_data_b.get(tier_name, {}).get("m_users", 0) if tiers_data_b else None
+                    y_users_b = tiers_data_b.get(tier_name, {}).get("y_users", 0) if tiers_data_b else None
+                    m_rev_b = rev_map_b.get(tier_name, {}).get("m_rev", 0) if rev_map_b else None
+                    y_rev_b = rev_map_b.get(tier_name, {}).get("y_rev", 0) if rev_map_b else None
+
+                    m_users_delta = _count_delta_line(metrics["m_users"], m_users_b, sub_cmp_suffix)
+                    y_users_delta = _count_delta_line(metrics["y_users"], y_users_b, sub_cmp_suffix)
+                    m_rev_delta = _card_delta_line(m_rev, m_rev_b, sub_cmp_suffix)
+                    y_rev_delta = _card_delta_line(y_rev, y_rev_b, sub_cmp_suffix)
 
                     html_card = f"""
                                     <div style="font-family:'Manrope',sans-serif; background:white; border:1px solid #EAECF0;
@@ -1677,9 +2369,11 @@ if subscription_tab:
                                                     {metrics['m_users']:,}
                                                     <span style="font-size:9px; font-weight:500; color:#6B7280;">subs</span>
                                                 </div>
+                                                {m_users_delta}
                                                 <div style="font-size:11px; font-weight:700; color:#2563EB;">
                                                     &#8377;{m_rev:,}
                                                 </div>
+                                                {m_rev_delta}
                                             </div>
 
                                             <div style="width:1px; background:#E5E7EB; align-self:stretch;"></div>
@@ -1691,15 +2385,17 @@ if subscription_tab:
                                                     {metrics['y_users']:,}
                                                     <span style="font-size:9px; font-weight:500; color:#6B7280;">subs</span>
                                                 </div>
+                                                {y_users_delta}
                                                 <div style="font-size:11px; font-weight:700; color:#1D4ED8;">
                                                     &#8377;{y_rev:,}
                                                 </div>
+                                                {y_rev_delta}
                                             </div>
 
                                         </div>
                                     </div>
                                     """
-                    st.components.v1.html(html_card, height=215, scrolling=False)
+                    st.components.v1.html(html_card, height=255 if sub_cmp_suffix else 215, scrolling=False)
 
         # ---- Membership Distribution + Premium by Partner ----
         c1, c2 = st.columns(2, gap="large")
@@ -1731,20 +2427,39 @@ if subscription_tab:
                 df_memb["pct"] = (df_memb["users"] / total_users * 100).round(1)
                 df_memb = df_memb.sort_values("users", ascending=True).reset_index(drop=True)
 
-                colors = ["#2563EB" for _ in df_memb["plan_name"]]
+                # Period B series — same plan set/order as Period A, values looked
+                # up from tiers_data_b/rev_map_b (already computed above for the
+                # Tier Explorer cards). A plan with 0 users in Period A won't get
+                # its own Period B bar even if it had users then — same "active
+                # in Period A" scoping the rest of this chart already uses.
+                df_memb_b = None
+                if sub_cmp_suffix and tiers_data_b:
+                    membership_rows_b = []
+                    for plan in df_memb["plan_name"]:
+                        metrics_b = tiers_data_b.get(plan, {"m_users": 0, "y_users": 0})
+                        users_b = metrics_b["m_users"] + metrics_b["y_users"]
+                        revenue_b = rev_map_b.get(plan, {}).get("m_rev", 0) + rev_map_b.get(plan, {}).get("y_rev", 0)
+                        membership_rows_b.append({
+                            "plan_name": plan, "users": users_b,
+                            "monthly_subs": metrics_b["m_users"], "annual_subs": metrics_b["y_users"],
+                            "plan_revenue": revenue_b,
+                        })
+                    df_memb_b = pd.DataFrame(membership_rows_b)
+                    total_users_b = df_memb_b["users"].sum()
+                    df_memb_b["pct"] = (df_memb_b["users"] / total_users_b * 100).round(1) if total_users_b else 0.0
 
-                fig = px.bar(df_memb, x="users", y="plan_name", orientation="h")
-                fig.update_traces(
-                    marker_color=colors,
-                    marker_line_width=0,
-                    marker_cornerradius=4,
-                    texttemplate="%{x:,} (%{customdata[0]:.1f}%)",
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    y=df_memb["plan_name"], x=df_memb["users"], orientation="h",
+                    name=subscription_period_a_label,
+                    marker=dict(color="#2563EB", line_width=0),
+                    text=[f"{u:,} ({p:.1f}%)" for u, p in zip(df_memb["users"], df_memb["pct"])],
                     textposition="outside",
                     textfont=dict(size=11, color="#374151", family="Manrope"),
                     cliponaxis=False,
                     customdata=df_memb[["pct", "monthly_subs", "annual_subs", "plan_revenue"]].values,
                     hovertemplate=(
-                        "<b>%{y}</b><br>"
+                        f"<b>%{{y}}</b> — {subscription_period_a_label}<br>"
                         "Active Members: <b>%{x:,}</b><br>"
                         "Share: <b>%{customdata[0]:.1f}%</b><br>"
                         "Monthly Subs: <b>%{customdata[1]:,}</b><br>"
@@ -1752,16 +2467,42 @@ if subscription_tab:
                         "Total Revenue: <b>₹%{customdata[3]:,}</b>"
                         "<extra></extra>"
                     ),
-                )
+                ))
+                if df_memb_b is not None:
+                    fig.add_trace(go.Bar(
+                        y=df_memb_b["plan_name"], x=df_memb_b["users"], orientation="h",
+                        name=subscription_period_b_label,
+                        marker=dict(color="#D1D5DB", line_width=0),
+                        text=[f"{u:,} ({p:.1f}%)" for u, p in zip(df_memb_b["users"], df_memb_b["pct"])],
+                        textposition="outside",
+                        textfont=dict(size=11, color="#374151", family="Manrope"),
+                        cliponaxis=False,
+                        customdata=df_memb_b[["pct", "monthly_subs", "annual_subs", "plan_revenue"]].values,
+                        hovertemplate=(
+                            f"<b>%{{y}}</b> — {subscription_period_b_label}<br>"
+                            "Active Members: <b>%{x:,}</b><br>"
+                            "Share: <b>%{customdata[0]:.1f}%</b><br>"
+                            "Monthly Subs: <b>%{customdata[1]:,}</b><br>"
+                            "Annual Subs: <b>%{customdata[2]:,}</b><br>"
+                            "Total Revenue: <b>₹%{customdata[3]:,}</b>"
+                            "<extra></extra>"
+                        ),
+                    ))
                 fig.update_layout(
                     height=310,
                     bargap=0.4,
+                    bargroupgap=0.1,
+                    barmode="group" if df_memb_b is not None else "relative",
                     **CHART_BG,
                     font=FONT,
                     margin=dict(l=12, r=90, t=10, b=40),
-                    showlegend=False,
+                    showlegend=df_memb_b is not None,
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1, font=dict(size=10, color="#0F172A"),
+                    ) if df_memb_b is not None else {},
                     hoverlabel=HOVER_LABEL,
-                    hovermode="y",
+                    hovermode="closest",
                     xaxis_title="Active Members",
                     yaxis_title="",
                 )
@@ -1773,6 +2514,20 @@ if subscription_tab:
                     showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT
                 )
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+                if df_memb_b is not None:
+                    with st.expander("Reconciliation table"):
+                        recon_memb = pd.DataFrame({
+                            "Plan": df_memb["plan_name"],
+                            subscription_period_a_label: df_memb["users"].values,
+                            subscription_period_b_label: df_memb_b["users"].values,
+                        })
+                        recon_memb["Change"] = recon_memb.apply(
+                            lambda r: "\u2014" if r[subscription_period_b_label] == 0 else f"{((r[subscription_period_a_label] - r[subscription_period_b_label]) / r[subscription_period_b_label] * 100):+.1f}%",
+                            axis=1,
+                        )
+                        st.dataframe(recon_memb.sort_values(subscription_period_a_label, ascending=False), hide_index=True, use_container_width=True)
+                        st.caption("Hover over a bar to see its Monthly/Annual split and revenue.")
             else:
                 st.info("No membership distribution data available.")
 
@@ -1829,23 +2584,64 @@ if subscription_tab:
             df_p["pct"] = (df_p["premium_users"] / df_p["premium_users"].sum() * 100).round(1)
             df_p["arpu"] = (df_p["total_revenue"] / df_p["premium_users"].replace(0, 1)).round(0).astype(int)
 
-            colors = [
-                "#6366F1" if partner == "Thefinpedia" else "#D1D5DB"
-                for partner in df_p["sso_partner_name"]
-            ]
+            # Period B series — same partner set/order as Period A. Rebuilds the
+            # identical merge (deduplicated Period B invoices + partner revenue)
+            # scoped to Period B's dates.
+            df_p_b = None
+            if sub_cmp_suffix:
+                if not df_inv_b_dedup.empty:
+                    df_inv_premium_only_b = df_inv_b_dedup[df_inv_b_dedup["billed_plan_name"].isin(premium_plans_list)]
+                    merged_premium_b = df_inv_premium_only_b.merge(
+                        df_users_for_partner[["user_id", "sso_partner_name"]], on="user_id", how="left"
+                    )
+                    merged_premium_b["sso_partner_name"] = merged_premium_b["sso_partner_name"].astype(str).str.strip()
+                    merged_premium_b["_norm"] = merged_premium_b["sso_partner_name"].str.lower()
+                    merged_premium_b = merged_premium_b[merged_premium_b["_norm"].isin(partner_canonical.keys())]
+                    merged_premium_b["sso_partner_name"] = merged_premium_b["_norm"].map(partner_canonical)
 
-            fig = px.bar(df_p, x="premium_users", y="sso_partner_name", orientation="h")
-            fig.update_traces(
-                marker_color=colors,
-                marker_line_width=0,
+                    premium_users_b = (
+                        merged_premium_b.groupby("sso_partner_name")["user_id"]
+                        .nunique()
+                        .reset_index(name="premium_users")
+                    )
+                else:
+                    premium_users_b = pd.DataFrame(columns=["sso_partner_name", "premium_users"])
+
+                # Same partner categories/order as Period A, 0 where a partner has
+                # no Period B activity.
+                df_p_b = pd.DataFrame({"sso_partner_name": df_p["sso_partner_name"]})
+                df_p_b = df_p_b.merge(premium_users_b, on="sso_partner_name", how="left")
+                df_p_b["premium_users"] = df_p_b["premium_users"].fillna(0).astype(int)
+
+                df_partner_plan_local_b = dd.get_partner_revenue_by_plan(subscription_period_b_start, subscription_period_b_end)
+                if not df_partner_plan_local_b.empty:
+                    partner_extra_b = df_partner_plan_local_b.groupby("sso_partner_name").agg(
+                        total_revenue=("revenue", "sum"),
+                        plan_count=("plan_name", "nunique")
+                    ).reset_index()
+                    df_p_b = df_p_b.merge(partner_extra_b, on="sso_partner_name", how="left")
+                else:
+                    df_p_b["total_revenue"] = 0
+                    df_p_b["plan_count"] = 0
+
+                df_p_b["total_revenue"] = df_p_b["total_revenue"].fillna(0).astype(int)
+                df_p_b["plan_count"] = df_p_b["plan_count"].fillna(0).astype(int)
+                total_b = df_p_b["premium_users"].sum()
+                df_p_b["pct"] = (df_p_b["premium_users"] / total_b * 100).round(1) if total_b else 0.0
+                df_p_b["arpu"] = (df_p_b["total_revenue"] / df_p_b["premium_users"].replace(0, 1)).round(0).astype(int)
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                y=df_p["sso_partner_name"], x=df_p["premium_users"], orientation="h",
+                name=subscription_period_a_label,
+                marker=dict(color=BLUE, line_width=0),
                 text=[f"{users} ({pct:.1f}%)" for users, pct in zip(df_p["premium_users"], df_p["pct"])],
-                texttemplate="%{text}",
                 textposition="outside",
                 textfont=dict(size=11, color="#374151"),
                 cliponaxis=False,
                 customdata=df_p[["pct", "total_revenue", "arpu", "plan_count"]].values,
                 hovertemplate=(
-                    "<b>%{y}</b><br>"
+                    f"<b>%{{y}}</b> — {subscription_period_a_label}<br>"
                     "Premium Users: <b>%{x:,.0f}</b><br>"
                     "Contribution: <b>%{customdata[0]:.1f}%</b><br>"
                     "Total Revenue: <b>₹%{customdata[1]:,}</b><br>"
@@ -1853,16 +2649,42 @@ if subscription_tab:
                     "Plans Active: <b>%{customdata[3]}</b>"
                     "<extra></extra>"
                 ),
-            )
+            ))
+            if df_p_b is not None:
+                fig.add_trace(go.Bar(
+                    y=df_p_b["sso_partner_name"], x=df_p_b["premium_users"], orientation="h",
+                    name=subscription_period_b_label,
+                    marker=dict(color="#D1D5DB", line_width=0),
+                    text=[f"{users} ({pct:.1f}%)" for users, pct in zip(df_p_b["premium_users"], df_p_b["pct"])],
+                    textposition="outside",
+                    textfont=dict(size=11, color="#374151"),
+                    cliponaxis=False,
+                    customdata=df_p_b[["pct", "total_revenue", "arpu", "plan_count"]].values,
+                    hovertemplate=(
+                        f"<b>%{{y}}</b> — {subscription_period_b_label}<br>"
+                        "Premium Users: <b>%{x:,.0f}</b><br>"
+                        "Contribution: <b>%{customdata[0]:.1f}%</b><br>"
+                        "Total Revenue: <b>₹%{customdata[1]:,}</b><br>"
+                        "Revenue per User: <b>₹%{customdata[2]:,}</b><br>"
+                        "Plans Active: <b>%{customdata[3]}</b>"
+                        "<extra></extra>"
+                    ),
+                ))
             fig.update_layout(
                 height=310,
                 bargap=0.4,
+                bargroupgap=0.1,
+                barmode="group" if df_p_b is not None else "relative",
                 **CHART_BG,
                 font=FONT,
                 margin=dict(l=12, r=70, t=10, b=40),
-                showlegend=False,
+                showlegend=df_p_b is not None,
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(size=10, color="#0F172A"),
+                ) if df_p_b is not None else {},
                 hoverlabel=HOVER_LABEL,
-                hovermode="y",
+                hovermode="closest",
                 xaxis_title="Premium Users",
                 yaxis_title="",
             )
@@ -1874,9 +2696,21 @@ if subscription_tab:
                 showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-            st.markdown("</div>", unsafe_allow_html=True)
 
-        anchor("subscription-user-growth-trend")
+            if df_p_b is not None:
+                with st.expander("Reconciliation table"):
+                    recon_partner_users = pd.DataFrame({
+                        "Partner": df_p["sso_partner_name"],
+                        subscription_period_a_label: df_p["premium_users"].values,
+                        subscription_period_b_label: df_p_b["premium_users"].values,
+                    })
+                    recon_partner_users["Change"] = recon_partner_users.apply(
+                        lambda r: "\u2014" if r[subscription_period_b_label] == 0 else f"{((r[subscription_period_a_label] - r[subscription_period_b_label]) / r[subscription_period_b_label] * 100):+.1f}%",
+                        axis=1,
+                    )
+                    st.dataframe(recon_partner_users.sort_values(subscription_period_a_label, ascending=False), hide_index=True, use_container_width=True)
+                    st.caption("Hover over a bar to see revenue and ARPU details.")
+            st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("""
             <div class="chart-card">
                 <div class="figure-title">User Growth Trend</div>
@@ -2394,18 +3228,24 @@ if subscription_tab:
             else:
                 df_plan_trend = df_plan_trend[df_plan_trend["renewed_users"] > 0].sort_values("renewal_rate", ascending=True)
 
+                # Period B series — same plan categories/order as Period A, 0
+                # where a plan had no renewals in Period B.
+                df_plan_trend_b = None
+                if sub_cmp_suffix:
+                    df_plan_trend_b_raw = dd.get_renewal_by_plan_period(subscription_period_b_start, subscription_period_b_end)
+                    df_plan_trend_b = pd.DataFrame({"plan_name": df_plan_trend["plan_name"]})
+                    df_plan_trend_b = df_plan_trend_b.merge(df_plan_trend_b_raw, on="plan_name", how="left")
+                    for col in ["renewed_users", "monthly_renewed", "annual_renewed", "total_renewed_all_plans", "renewal_rate"]:
+                        df_plan_trend_b[col] = df_plan_trend_b[col].fillna(0)
+
                 if df_plan_trend.empty:
                     st.info("No renewals in this period.")
                 else:
-                    fig_plan = px.bar(df_plan_trend, x="renewal_rate", y="plan_name", orientation="h")
-
-                    bar_colors = [color_map_plan.get(p, BLUE) for p in df_plan_trend["plan_name"]]
-
-                    fig_plan.update_traces(
-                        marker_color=bar_colors,
-                        marker_line_width=0,
-                        marker_cornerradius=4,
-
+                    fig_plan = go.Figure()
+                    fig_plan.add_trace(go.Bar(
+                        y=df_plan_trend["plan_name"], x=df_plan_trend["renewal_rate"], orientation="h",
+                        name=subscription_period_a_label,
+                        marker=dict(color=BLUE, line_width=0),
                         customdata=df_plan_trend[
                             [
                                 "total_renewed_all_plans",
@@ -2415,7 +3255,6 @@ if subscription_tab:
                                 "renewal_rate",
                             ]
                         ],
-
                         text=df_plan_trend["renewal_rate"].apply(lambda x: f"{x:.1f}%"),
                         textposition="outside",
                         textfont=dict(
@@ -2423,48 +3262,68 @@ if subscription_tab:
                             color="#374151",
                             family="Manrope",
                         ),
-
                         cliponaxis=False,
+                        hovertemplate=(
+                            f"<b>%{{y}}</b> — {subscription_period_a_label}"
+                            "<br><br>"
+                            "Total Renewals (window) <b>%{customdata[0]:,}</b><br>"
+                            "Renewed Users (this plan) <b>%{customdata[1]:,}</b><br>"
+                            "Monthly <b>%{customdata[2]:,}</b><br>"
+                            "Annual <b>%{customdata[3]:,}</b><br><br>"
+                            "Share of Total Renewals <b>%{customdata[4]:.1f}%</b>"
+                            "<extra></extra>"
+                        ),
+                    ))
 
-                        hovertemplate="""
-                <b>%{y}</b>
-
-                <br><br>
-            
-                Total Renewals (window)
-                <b>%{customdata[0]:,}</b>
-                <br>
-                Renewed Users (this plan)
-                <b>%{customdata[1]:,}</b>
-
-                <br>
-
-                Monthly
-                <b>%{customdata[2]:,}</b>
-
-                <br>
-
-                Annual
-                <b>%{customdata[3]:,}</b>
-
-                <br><br>
-
-                Share of Total Renewals
-                <b>%{customdata[4]:.1f}%</b>
-
-                <extra></extra>
-                """
-                    )
+                    if df_plan_trend_b is not None:
+                        fig_plan.add_trace(go.Bar(
+                            y=df_plan_trend_b["plan_name"], x=df_plan_trend_b["renewal_rate"], orientation="h",
+                            name=subscription_period_b_label,
+                            marker=dict(color="#D1D5DB", line_width=0),
+                            customdata=df_plan_trend_b[
+                                [
+                                    "total_renewed_all_plans",
+                                    "renewed_users",
+                                    "monthly_renewed",
+                                    "annual_renewed",
+                                    "renewal_rate",
+                                ]
+                            ],
+                            text=df_plan_trend_b["renewal_rate"].apply(lambda x: f"{x:.1f}%"),
+                            textposition="outside",
+                            textfont=dict(
+                                size=11,
+                                color="#374151",
+                                family="Manrope",
+                            ),
+                            cliponaxis=False,
+                            hovertemplate=(
+                                f"<b>%{{y}}</b> — {subscription_period_b_label}"
+                                "<br><br>"
+                                "Total Renewals (window) <b>%{customdata[0]:,}</b><br>"
+                                "Renewed Users (this plan) <b>%{customdata[1]:,}</b><br>"
+                                "Monthly <b>%{customdata[2]:,}</b><br>"
+                                "Annual <b>%{customdata[3]:,}</b><br><br>"
+                                "Share of Total Renewals <b>%{customdata[4]:.1f}%</b>"
+                                "<extra></extra>"
+                            ),
+                        ))
 
                     fig_plan.update_layout(
                         height=310,
                         bargap=0.4,
+                        bargroupgap=0.1,
+                        barmode="group" if df_plan_trend_b is not None else "relative",
                         **CHART_BG,
                         font=FONT,
                         margin=dict(l=12, r=70, t=10, b=40),
-                        showlegend=False,
+                        showlegend=df_plan_trend_b is not None,
+                        legend=dict(
+                            orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1, font=dict(size=10, color="#0F172A"),
+                        ) if df_plan_trend_b is not None else {},
                         hoverlabel=HOVER_LABEL,
-                        hovermode="y",
+                        hovermode="closest",
                         xaxis_title="Renewal Rate (%)",
                         yaxis_title=""
                     )
@@ -2473,6 +3332,20 @@ if subscription_tab:
                     fig_plan.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
 
                     st.plotly_chart(fig_plan, use_container_width=True, config={"displayModeBar": False})
+
+                    if df_plan_trend_b is not None:
+                        with st.expander("Reconciliation table"):
+                            recon_plan_renewal = pd.DataFrame({
+                                "Plan": df_plan_trend["plan_name"],
+                                subscription_period_a_label: df_plan_trend["renewal_rate"].values,
+                                subscription_period_b_label: df_plan_trend_b["renewal_rate"].values,
+                            })
+                            recon_plan_renewal["Change"] = recon_plan_renewal.apply(
+                                lambda r: "\u2014" if r[subscription_period_b_label] == 0 else f"{((r[subscription_period_a_label] - r[subscription_period_b_label]) / r[subscription_period_b_label] * 100):+.1f}%",
+                                axis=1,
+                            )
+                            st.dataframe(recon_plan_renewal.sort_values(subscription_period_a_label, ascending=False), hide_index=True, use_container_width=True)
+                            st.caption("Renewal Rate = this plan's share of total renewals in the window, not a conversion rate.")
 
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2529,16 +3402,24 @@ if subscription_tab:
         else:
             df_partner_trend = df_partner_trend[df_partner_trend["renewed_users"] > 0].sort_values("renewal_rate", ascending=True)
 
+            # Period B series — same partner categories/order as Period A, 0
+            # where a partner had no renewals in Period B.
+            df_partner_trend_b = None
+            if sub_cmp_suffix:
+                df_partner_trend_b_raw = dd.get_renewal_by_partner_period(subscription_period_b_start, subscription_period_b_end)
+                df_partner_trend_b = pd.DataFrame({"sso_partner_name": df_partner_trend["sso_partner_name"]})
+                df_partner_trend_b = df_partner_trend_b.merge(df_partner_trend_b_raw, on="sso_partner_name", how="left")
+                for col in ["renewed_users", "monthly_renewed", "annual_renewed", "total_renewed_all_partners", "renewal_rate"]:
+                    df_partner_trend_b[col] = df_partner_trend_b[col].fillna(0)
+
             if df_partner_trend.empty:
                 st.info("No renewals in this period.")
             else:
-                fig_partner = px.bar(df_partner_trend, x="renewal_rate", y="sso_partner_name", orientation="h")
-
-                fig_partner.update_traces(
-                    marker_color=BLUE,
-                    marker_line_width=0,
-                    marker_cornerradius=4,
-
+                fig_partner = go.Figure()
+                fig_partner.add_trace(go.Bar(
+                    y=df_partner_trend["sso_partner_name"], x=df_partner_trend["renewal_rate"], orientation="h",
+                    name=subscription_period_a_label,
+                    marker=dict(color=BLUE, line_width=0),
                     customdata=df_partner_trend[
                         [
                             "total_renewed_all_partners",
@@ -2548,7 +3429,6 @@ if subscription_tab:
                             "renewal_rate",
                         ]
                     ],
-
                     text=df_partner_trend["renewal_rate"].apply(lambda x: f"{x:.1f}%"),
                     textposition="outside",
                     textfont=dict(
@@ -2556,50 +3436,68 @@ if subscription_tab:
                         color="#374151",
                         family="Manrope",
                     ),
-
                     cliponaxis=False,
+                    hovertemplate=(
+                        f"<b>%{{y}}</b> — {subscription_period_a_label}"
+                        "<br><br>"
+                        "Total Renewals (window) <b>%{customdata[0]:,}</b><br>"
+                        "Renewed Users (this partner) <b>%{customdata[1]:,}</b><br>"
+                        "Monthly <b>%{customdata[2]:,}</b><br>"
+                        "Annual <b>%{customdata[3]:,}</b><br><br>"
+                        "Share of Total Renewals <b>%{customdata[4]:.1f}%</b>"
+                        "<extra></extra>"
+                    ),
+                ))
 
-                    hovertemplate="""
-            <b>%{y}</b>
-
-            <br><br>
-
-            Total Renewals (window)
-            <b>%{customdata[0]:,}</b>
-
-            <br>
-
-            Renewed Users (this partner)
-            <b>%{customdata[1]:,}</b>
-
-            <br>
-
-            Monthly
-            <b>%{customdata[2]:,}</b>
-
-            <br>
-
-            Annual
-            <b>%{customdata[3]:,}</b>
-
-            <br><br>
-
-            Share of Total Renewals
-            <b>%{customdata[4]:.1f}%</b>
-
-            <extra></extra>
-            """
-                )
+                if df_partner_trend_b is not None:
+                    fig_partner.add_trace(go.Bar(
+                        y=df_partner_trend_b["sso_partner_name"], x=df_partner_trend_b["renewal_rate"], orientation="h",
+                        name=subscription_period_b_label,
+                        marker=dict(color="#D1D5DB", line_width=0),
+                        customdata=df_partner_trend_b[
+                            [
+                                "total_renewed_all_partners",
+                                "renewed_users",
+                                "monthly_renewed",
+                                "annual_renewed",
+                                "renewal_rate",
+                            ]
+                        ],
+                        text=df_partner_trend_b["renewal_rate"].apply(lambda x: f"{x:.1f}%"),
+                        textposition="outside",
+                        textfont=dict(
+                            size=11,
+                            color="#374151",
+                            family="Manrope",
+                        ),
+                        cliponaxis=False,
+                        hovertemplate=(
+                            f"<b>%{{y}}</b> — {subscription_period_b_label}"
+                            "<br><br>"
+                            "Total Renewals (window) <b>%{customdata[0]:,}</b><br>"
+                            "Renewed Users (this partner) <b>%{customdata[1]:,}</b><br>"
+                            "Monthly <b>%{customdata[2]:,}</b><br>"
+                            "Annual <b>%{customdata[3]:,}</b><br><br>"
+                            "Share of Total Renewals <b>%{customdata[4]:.1f}%</b>"
+                            "<extra></extra>"
+                        ),
+                    ))
 
                 fig_partner.update_layout(
                     height=320,
                     bargap=0.4,
+                    bargroupgap=0.1,
+                    barmode="group" if df_partner_trend_b is not None else "relative",
                     **CHART_BG,
                     font=FONT,
                     margin=dict(l=12, r=70, t=10, b=40),
-                    showlegend=False,
+                    showlegend=df_partner_trend_b is not None,
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1, font=dict(size=10, color="#0F172A"),
+                    ) if df_partner_trend_b is not None else {},
                     hoverlabel=HOVER_LABEL,
-                    hovermode="y",
+                    hovermode="closest",
                     xaxis_title="Renewal Rate (%)",
                     yaxis_title=""
                 )
@@ -2608,6 +3506,20 @@ if subscription_tab:
                 fig_partner.update_yaxes(showgrid=False, title_font=AXIS_FONT, tickfont=TICK_FONT)
 
                 st.plotly_chart(fig_partner, use_container_width=True, config={"displayModeBar": False})
+
+                if df_partner_trend_b is not None:
+                    with st.expander("Reconciliation table"):
+                        recon_partner_renewal = pd.DataFrame({
+                            "Partner": df_partner_trend["sso_partner_name"],
+                            subscription_period_a_label: df_partner_trend["renewal_rate"].values,
+                            subscription_period_b_label: df_partner_trend_b["renewal_rate"].values,
+                        })
+                        recon_partner_renewal["Change"] = recon_partner_renewal.apply(
+                            lambda r: "\u2014" if r[subscription_period_b_label] == 0 else f"{((r[subscription_period_a_label] - r[subscription_period_b_label]) / r[subscription_period_b_label] * 100):+.1f}%",
+                            axis=1,
+                        )
+                        st.dataframe(recon_partner_renewal.sort_values(subscription_period_a_label, ascending=False), hide_index=True, use_container_width=True)
+                        st.caption("Renewal Rate = this partner's share of total renewals in the window, not a conversion rate.")
 
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
