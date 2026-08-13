@@ -102,6 +102,13 @@ def _fmt_currency(value):
     except (TypeError, ValueError):
         return "\u20b90"
 
+def _fmt_aum(value):
+    try:
+        v = float(value)
+        return f"₹{v:,.2f} Cr"
+    except (TypeError, ValueError):
+        return "—"
+
 
 def _safe_text(value, fallback="\u2014"):
     """Escapes HTML-special characters and strips embedded newlines from user-controlled
@@ -273,6 +280,7 @@ def show_user_360():
             <div><b>User type:</b> {_safe_text(profile.get('user_type'))}</div>
             <div><b>SSO partner:</b> {_safe_text(profile.get('sso_partner_name'))}</div>
             <div><b>ARN:</b> {_safe_text(profile.get('arn_number'))}</div>
+            <div><b>AUM:</b> {_fmt_aum(profile.get('aum_crores'))}</div>
             <div><b>Registered:</b> {_fmt_date(profile.get('registered_at'))}</div>
         </div>
     </div>
