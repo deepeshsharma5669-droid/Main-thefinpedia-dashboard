@@ -243,6 +243,125 @@ def _resolve_previous_period(period_label):
         return None, None, None
 
 
+POSTING_STATUS_LABELS = {
+    "SUCCESS": "\u2705 Published", "FAILED": "\u274c Failed",
+    "PENDING": "\u23f3 Pending", "SCHEDULED": "\U0001F5D3 Scheduled",
+}
+
+
+def _render_posting_health():
+    """KPI cards + filterable post list. Uses IST for 'today' because the server runs in UTC."""
+    today_ist = pd.Timestamp.now(tz="Asia/Kolkata").date()
+    yesterday_ist = today_ist - timedelta(days=1)
+
+    # Fixed 'today' KPIs (always today, whatever date range is picked below)
+    k_today = dd.get_posting_log_kpis(today_ist, today_ist) or {}
+    k_yday = dd.get_posting_log_kpis(yesterday_ist, yesterday_ist) or {}
+
+    f_today = int(k_today.get("failed", 0) or 0)
+    f_yday = int(k_yday.get("failed", 0) or 0)
+
+    # Date control
+    c1, c2, c3 = st.columns([1.6, 2, 2])
+    with c1:
+        mode = st.radio("Date", ["Today", "Yesterday", "Custom"], horizontal=True,
+                        key="posting_health_mode", label_visibility="collapsed")
+    if mode == "Today":
+        d_start = d_end = today_ist
+    elif mode == "Yesterday":
+        d_start = d_end = yesterday_ist
+    else:
+        with c2:
+            picked = st.date_input("Date range", value=(today_ist - timedelta(days=6), today_ist),
+                                   max_value=today_ist, key="posting_health_custom",
+                                   label_visibility="collapsed")
+        if isinstance(picked, (list, tuple)):
+            if len(picked) == 2:
+                d_start, d_end = picked
+            elif len(picked) == 1:
+                d_start = d_end = picked[0]
+            else:
+                d_start = d_end = today_ist
+        else:
+            d_start = d_end = picked
+
+    range_label = (d_start.strftime("%d %b %Y") if d_start == d_end
+                   else f"{d_start.strftime('%d %b')} \u2013 {d_end.strftime('%d %b %Y')}")
+
+    k = dd.get_posting_log_kpis(d_start, d_end) or {}
+    published = int(k.get("published", 0) or 0)
+    failed = int(k.get("failed", 0) or 0)
+    failed_users = int(k.get("failed_users", 0) or 0)
+    fail_rate = k.get("failure_rate")
+
+    m = st.columns(5)
+    m[0].metric("Failed Today", f"{f_today:,}",
+                f"{f_today - f_yday:+,} vs yesterday" if (f_today or f_yday) else None,
+                delta_color="inverse",
+                help="Failed posts scheduled for today (IST). Always today, regardless of the date picked.")
+    m[1].metric(f"Published \u2014 {range_label}", f"{published:,}")
+    m[2].metric(f"Failed \u2014 {range_label}", f"{failed:,}", delta_color="inverse")
+    m[3].metric("Failure Rate", f"{fail_rate}%" if fail_rate is not None else "\u2014",
+                help="Failed \u00f7 (Published + Failed) in the selected dates. Pending / Scheduled posts are not counted.")
+    m[4].metric("Users Affected", f"{failed_users:,}", help="Distinct users with at least one failed post in the selected dates.")
+
+    df = dd.get_posting_log(d_start, d_end)
+    if df is None or df.empty:
+        st.info(f"No scheduled posts for {range_label}.")
+        return
+    if len(df) >= 1000:
+        st.warning("Showing the latest 1,000 posts for this range \u2014 narrow the dates to see the rest.")
+
+    df = df.copy()
+    df["scheduled_ist"] = pd.to_datetime(df["scheduled_for"], utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+    df["posted_ist"] = pd.to_datetime(df["posted_on_time"], utc=True, errors="coerce").dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+    df["Status"] = df["posting_status"].map(POSTING_STATUS_LABELS).fillna(df["posting_status"])
+    df["Type"] = df["is_manual_post"].map({True: "Manual", False: "Auto"}).fillna("Auto")
+    df["User"] = df["user_name"].fillna("User #" + df["user_id"].astype("Int64").astype(str))
+
+    f1, f2, f3 = st.columns([2, 2, 2])
+    with f1:
+        status_pick = st.multiselect("Status", list(POSTING_STATUS_LABELS.values()),
+                                     default=[POSTING_STATUS_LABELS["SUCCESS"], POSTING_STATUS_LABELS["FAILED"]],
+                                     key="posting_health_status")
+    with f2:
+        platform_opts = sorted(df["platform_name"].dropna().unique().tolist())
+        platform_pick = st.multiselect("Platform", platform_opts, key="posting_health_platform",
+                                       placeholder="All platforms")
+    with f3:
+        search = st.text_input("Search user / mobile / company", key="posting_health_search",
+                               placeholder="Type to filter\u2026")
+
+    view = df[df["Status"].isin(status_pick)] if status_pick else df
+    if platform_pick:
+        view = view[view["platform_name"].isin(platform_pick)]
+    if search.strip():
+        q = search.strip().lower()
+        hay = (view["User"].fillna("") + " " + view["mobile_number"].fillna("") + " " + view["company_name"].fillna("")).str.lower()
+        view = view[hay.str.contains(q, regex=False)]
+
+    st.caption(f"{len(view):,} post{'s' if len(view) != 1 else ''} \u00b7 {range_label}")
+    if view.empty:
+        st.info("No posts match these filters.")
+        return
+
+    show = view[["scheduled_ist", "User", "mobile_number", "company_name", "platform_name",
+                 "content_title", "Type", "Status", "posted_ist", "failure_reason"]].rename(columns={
+        "scheduled_ist": "Scheduled For (IST)", "mobile_number": "Mobile", "company_name": "Company",
+        "platform_name": "Platform", "content_title": "Content", "posted_ist": "Posted At (IST)",
+        "failure_reason": "Failure Reason",
+    })
+    st.dataframe(
+        show, hide_index=True, use_container_width=True, height=420,
+        column_config={
+            "Scheduled For (IST)": st.column_config.DatetimeColumn(format="DD MMM, hh:mm A"),
+            "Posted At (IST)": st.column_config.DatetimeColumn(format="DD MMM, hh:mm A"),
+            "Content": st.column_config.TextColumn(width="medium"),
+            "Failure Reason": st.column_config.TextColumn(width="large"),
+        },
+    )
+
+
 def show_product_usage():
     anchor("product-usage-overview")
     st.markdown("<div class='section-header'>Product Usage Overview</div>", unsafe_allow_html=True)
@@ -375,6 +494,19 @@ def show_product_usage():
         ),
         unsafe_allow_html=True,
     )
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------
+    # POSTING HEALTH
+    # Boss view: which scheduled posts were published / failed, how many failed
+    # today, and for which users. Own date control (Today / Yesterday / Custom),
+    # independent of the Period A vs B dropdowns above. Dates are IST days based on
+    # scheduled_for (same basis as the daily failure-digest email).
+    # --------------------------------------------------------
+    anchor("product-usage-posting-health")
+    chart_card_open("Posting Health", "Scheduled posts that were published or failed \u2014 who was affected and why. Dates are IST, based on scheduled time.")
+    _render_posting_health()
+    chart_card_close()
     st.markdown("<br>", unsafe_allow_html=True)
 
     # --------------------------------------------------------
