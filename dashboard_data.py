@@ -2143,3 +2143,29 @@ def get_campaign_performance_period(start_date, end_date):
     }).execute()
     rows = result.data
     return rows[0] if rows else {}
+
+
+# ============================================================
+# POSTING HEALTH (Product Usage tab)
+# Date args are IST calendar days (date objects), inclusive.
+# SQL: posting_health.sql -> get_posting_log_kpis / get_posting_log
+# ============================================================
+@st.cache_data(ttl=60)
+def get_posting_log_kpis(start_date, end_date):
+    """One-row dict: total_posts, published, failed, pending, scheduled, failed_users, failure_rate."""
+    result = supabase.rpc("get_posting_log_kpis", {
+        "p_start_date": start_date.isoformat(),
+        "p_end_date": end_date.isoformat(),
+    }).execute()
+    rows = result.data or []
+    return rows[0] if rows else {}
+
+
+@st.cache_data(ttl=60)
+def get_posting_log(start_date, end_date):
+    """Post-level rows (max 1000, newest first) for the date range."""
+    result = supabase.rpc("get_posting_log", {
+        "p_start_date": start_date.isoformat(),
+        "p_end_date": end_date.isoformat(),
+    }).execute()
+    return pd.DataFrame(result.data or [])
